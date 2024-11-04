@@ -34,7 +34,7 @@ class TrainConfig:
 
 class CharTokenizer:
 
-    def __init__(self, text) -> None:
+    def __init__(self, text: str = "") -> None:
         self._stoi, self._itos = self._build_alphabet(text)
 
     def _build_alphabet(self, text: str) -> tuple[dict[str, int], dict[int, str]]:
