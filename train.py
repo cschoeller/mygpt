@@ -10,7 +10,7 @@ from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim.adamw import AdamW
 
-from models import BigramLanguageModel
+from models import BigramLanguageModel, BaseLanguageModel
 
 
 _CHARSETS: Final = [" ", string.ascii_letters, string.digits, string.punctuation]
@@ -24,7 +24,7 @@ class ModelType(Enum):
 class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
-    epochs = 10
+    epochs = 2
     batch_size: int = 4
     lr: float = 0.01
     shuffle: bool = True
@@ -109,6 +109,12 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
             running_loss += loss.item()
             print(f"epoch {e} batch {i}/{len(train_loader)} loss {running_loss/(i+1)}")
 
+def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int):
+    start_tokens = torch.zeros(size=(4,1), dtype=torch.long)
+    preds = model.generate(start_tokens, max_new_tokens)
+    for pred in preds:
+        sample_text = tokenizer.decode(pred[1:].tolist())
+        print(sample_text + "\n")
 
 def main():
     config = TrainConfig()
@@ -120,6 +126,7 @@ def main():
     
     model = BigramLanguageModel(len(tokenizer))
     train(model, train_dataset, val_dataset, config)
+    sample_text(model, tokenizer, 50)
 
 
 if __name__ == "__main__":

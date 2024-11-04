@@ -1,7 +1,21 @@
+from abc import ABC, abstractmethod
+
 import torch
 import torch.nn as nn
 
-class BigramLanguageModel(nn.Module):
+
+class BaseLanguageModel(nn.Module, ABC):
+
+    @abstractmethod
+    def forward(self, token_indices: torch.Tensor):
+        ...
+    
+    @abstractmethod
+    def generate(self, token_indices: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
+        ...
+
+
+class BigramLanguageModel(BaseLanguageModel):
     """Stores a lookup table of embeddings per token"""
 
     def __init__(self, vocab_size):
