@@ -15,10 +15,11 @@ class BaseLanguageModel(nn.Module, ABC):
         ...
 
 
-class BigramLanguageModel(BaseLanguageModel):
-    """Stores a lookup table of embeddings per token"""
+class BigramLM(BaseLanguageModel):
+    """Stores a lookup table of embeddings per token to model next-token distributions."""
 
     def __init__(self, vocab_size):
+        """Initialize the model."""
         super().__init__()
         self._token_embedding_table = nn.Embedding(vocab_size, vocab_size)
 
@@ -26,11 +27,11 @@ class BigramLanguageModel(BaseLanguageModel):
         """Computes the output logits.
         
         Args:
-            token_indices: List of token indices, shape (B, T).
+            token_indices: Sequences of tokens, shape (B, T).
 
         Returns:
-            Logits of shape (B, T, C). Where B is batch, T is time in
-            the sequence and C channels (or features).
+            Logits of shape (B, T, V). Where B is batch, T is time in
+            the sequence and V is the vocabulary size.
         """
         return self._token_embedding_table(token_indices)
 
@@ -38,13 +39,12 @@ class BigramLanguageModel(BaseLanguageModel):
         """Samples max_new_tokens predicted tokens based on the input tokens.
         
         Args:
-            token_indices: Input token sequences of shape (B, T).
+            token_indices: Sequences of tokens, shape (B, T).
             max_new_tokens: Number of next tokens to predict.
 
         Returns:
             Concatenation of the input tokens with predicted ones, shape (B, T + max_new_tokens).
         """
-
         with torch.no_grad():
 
             for _ in range(max_new_tokens):
@@ -52,6 +52,65 @@ class BigramLanguageModel(BaseLanguageModel):
                 token_logits = self(last_tokens)
                 token_probs = torch.softmax(token_logits, dim=-1)
                 pred_tokens = torch.multinomial(input=token_probs, num_samples=1)
+                token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
+
+            return token_indices
+
+
+class RecurrentLM(BaseLanguageModel):
+    """GRU based recurrent language prediction model."""
+
+    def __init__(self, vocab_size: int, embed_dim: int = 16, hidden_size: int = 64, num_layers: int = 3):
+        """Initialize the model.
+        
+        Args:
+            vocab_size: Size of the token vocabulary.
+            embed_dim: Dims of token embeddings.
+            hidden_size: Size of the GRUs internal hidden states.
+            num_layers: Number of layers in the stacked GRU.
+        """
+        super().__init__()
+        self._token_embeddings = nn.Embedding(vocab_size, embed_dim)
+        self._rnn = torch.nn.GRU(input_size=embed_dim, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
+        self._h0 = torch.nn.Parameter(torch.rand(size=(num_layers, 1, hidden_size), dtype=torch.float32))
+        self.decoder = nn.Sequential(nn.Linear(hidden_size, hidden_size),
+                                     nn.ReLU(),
+                                     nn.Linear(hidden_size, vocab_size))
+
+
+    def forward(self, token_indices: torch.Tensor):
+        """Compute the logits for each token in the sequences.
+        
+        Args:
+            token_indices: Sequences of tokens, shape (B, T).
+
+        Returns:
+            Logits of shape (B, T, V). Where B is batch, T is time in
+            the sequence and V is the vocabulary size.
+        """
+        encoded_tokens = self._token_embeddings(token_indices)
+        h0 = self._h0.expand(-1, token_indices.shape[0] , -1)
+        outputs, _ = self._rnn(encoded_tokens, h0)
+        return self.decoder(outputs)
+    
+
+    def generate(self, token_indices: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
+        """Samples max_new_tokens predicted tokens based on the input tokens.
+        
+        Args:
+            token_indices: Sequences of tokens, shape (B, T).
+            max_new_tokens: Number of next tokens to predict.
+
+        Returns:
+            Concatenation of the input tokens with predicted ones, shape (B, T + max_new_tokens).
+        """
+        with torch.no_grad():
+
+            for _ in range(max_new_tokens):
+                last_tokens = token_indices[:, -1]
+                token_logits = self(last_tokens.unsqueeze(-1))
+                token_probs = torch.softmax(token_logits, dim=-1)
+                pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
                 token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
             return token_indices

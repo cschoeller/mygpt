@@ -10,7 +10,7 @@ from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim.adamw import AdamW
 
-from models import BigramLanguageModel, BaseLanguageModel
+from models import BigramLM, BaseLanguageModel, RecurrentLM
 
 
 _CHARSETS: Final = [" ", string.ascii_letters, string.digits, string.punctuation]
@@ -24,11 +24,11 @@ class ModelType(Enum):
 class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
-    epochs = 2
-    batch_size: int = 4
-    lr: float = 0.01
+    epochs = 3
+    batch_size: int = 32
+    lr: float = 0.001
     shuffle: bool = True
-    block_size: int = 8 # max context length
+    context_length: int = 16
     model: ModelType = ModelType.BIGRAM
 
 
@@ -82,11 +82,11 @@ def load_text(path_to_textfile: str) -> str:
 def create_datasets(encoded_text: torch.Tensor, config: TrainConfig) -> tuple[TextDataset, TextDataset]:
     n = int(config.p_train * len(encoded_text))
     train, val = encoded_text[:n], encoded_text[n:]
-    return TextDataset(train, config.block_size), TextDataset(val, config.block_size)
+    return TextDataset(train, config.context_length), TextDataset(val, config.context_length)
 
 
 def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    B, T, C = logits.shape
+    *_, C = logits.shape
     logits = logits.view(-1, C)
     targets = targets.view(-1)
     return F.cross_entropy(logits, targets)
@@ -96,7 +96,7 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=config.shuffle)
     optimizer = AdamW(model.parameters(), lr=config.lr)
 
-    for e in range(config.epochs):
+    for e in range(1, config.epochs+1):
         running_loss = 0.
         for i, batch in enumerate(train_loader):
             x, targets = batch
@@ -107,7 +107,7 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
             optimizer.zero_grad()
 
             running_loss += loss.item()
-            print(f"epoch {e} batch {i}/{len(train_loader)} loss {running_loss/(i+1)}")
+            print(f"epoch {e}, batch {i}/{len(train_loader)}, loss {running_loss/(i+1)}")
 
 def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int):
     start_tokens = torch.zeros(size=(4,1), dtype=torch.long)
@@ -124,7 +124,11 @@ def main():
     encoded_text = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
-    model = BigramLanguageModel(len(tokenizer))
+    #model = BigramLM(len(tokenizer))
+    model = RecurrentLM(len(tokenizer), embed_dim=64, hidden_size=256, num_layers=3)
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters: {num_params}")
+
     train(model, train_dataset, val_dataset, config)
     sample_text(model, tokenizer, 50)
 
