@@ -28,11 +28,12 @@ class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
     epochs = 3
-    batch_size: int = 32
+    batch_size: int = 64
     lr: float = 0.01
     shuffle: bool = True
     context_length: int = 64
     model: ModelType = ModelType.RNNGRAVES
+    device: str = "cuda"
 
 
 class CharTokenizer:
@@ -97,6 +98,8 @@ def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
 def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     model.train()
+    model.to(config.device)
+
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
                               shuffle=config.shuffle, num_workers=8,
                               pin_memory=True)
@@ -106,6 +109,8 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
         running_loss = 0.
         for i, batch in enumerate(train_loader):
             x, targets = batch
+            x, targets = x.to(config.device), targets.to(config.device)
+
             logits = model(x)
             loss = loss_fn(logits, targets)
             loss.backward()
@@ -116,8 +121,9 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
             print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1)}")
 
 
-def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int):
-    start_tokens = torch.zeros(size=(5,1), dtype=torch.long)
+def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int, config: TrainConfig):
+    model.to(config.device)
+    start_tokens = torch.zeros(size=(1,1), dtype=torch.long, device=config.device)
     preds = model.generate(start_tokens, max_new_tokens)
     for pred in preds:
         sample_text = tokenizer.decode(pred[1:].tolist())
@@ -134,7 +140,7 @@ def build_model(vocab_size: int, config: TrainConfig):
             # of the input information gets lost passing from layer to layer.
             return RecurrentLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=1)
         case ModelType.RNNGRAVES:
-            return RecurrentLMGraves(vocab_size, embed_dim=32, hidden_dim=128, num_layers=8)
+            return RecurrentLMGraves(vocab_size, embed_dim=32, hidden_dim=256, num_layers=8)
         
     raise KeyError("Specified model type {config.model} not available.")
 
@@ -153,7 +159,7 @@ def main():
     print(f"Number of trainable parameters: {num_params}")
 
     train(model, train_dataset, val_dataset, config)
-    sample_text(model, tokenizer, 50)
+    sample_text(model, tokenizer, 300, config)
 
 
 if __name__ == "__main__":
