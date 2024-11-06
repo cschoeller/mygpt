@@ -28,10 +28,10 @@ class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
     epochs = 3
-    batch_size: int = 128
+    batch_size: int = 32
     lr: float = 0.01
     shuffle: bool = True
-    context_length: int = 128
+    context_length: int = 64
     model: ModelType = ModelType.RNNGRAVES
 
 
@@ -97,7 +97,9 @@ def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
 def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     model.train()
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=config.shuffle, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
+                              shuffle=config.shuffle, num_workers=8,
+                              pin_memory=True)
     optimizer = AdamW(model.parameters(), lr=config.lr)
 
     for e in range(1, config.epochs+1):
@@ -151,7 +153,7 @@ def main():
     print(f"Number of trainable parameters: {num_params}")
 
     train(model, train_dataset, val_dataset, config)
-    #sample_text(model, tokenizer, 50)
+    sample_text(model, tokenizer, 50)
 
 
 if __name__ == "__main__":
