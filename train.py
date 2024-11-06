@@ -10,7 +10,7 @@ from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim.adamw import AdamW
 
-from models import BigramLM, BaseLanguageModel, RecurrentLM
+from models import BigramLM, BaseLanguageModel, RecurrentLM, RecurrentLMGraves
 
 
 _CHARSETS: Final = [" ", string.ascii_letters, string.digits, string.punctuation]
@@ -18,6 +18,9 @@ _CHARSETS: Final = [" ", string.ascii_letters, string.digits, string.punctuation
 
 class ModelType(Enum):
     BIGRAM = auto()
+    RNN = auto()
+    RNNGRAVES = auto()
+    TRANSFORMER = auto()
 
 
 @dataclass
@@ -25,11 +28,11 @@ class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
     epochs = 3
-    batch_size: int = 32
-    lr: float = 0.001
+    batch_size: int = 128
+    lr: float = 0.01
     shuffle: bool = True
-    context_length: int = 16
-    model: ModelType = ModelType.BIGRAM
+    context_length: int = 128
+    model: ModelType = ModelType.RNNGRAVES
 
 
 class CharTokenizer:
@@ -93,7 +96,8 @@ def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
 
 def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=config.shuffle)
+    model.train()
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=config.shuffle, num_workers=4)
     optimizer = AdamW(model.parameters(), lr=config.lr)
 
     for e in range(1, config.epochs+1):
@@ -107,14 +111,31 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
             optimizer.zero_grad()
 
             running_loss += loss.item()
-            print(f"epoch {e}, batch {i}/{len(train_loader)}, loss {running_loss/(i+1)}")
+            print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1)}")
+
 
 def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int):
-    start_tokens = torch.zeros(size=(4,1), dtype=torch.long)
+    start_tokens = torch.zeros(size=(5,1), dtype=torch.long)
     preds = model.generate(start_tokens, max_new_tokens)
     for pred in preds:
         sample_text = tokenizer.decode(pred[1:].tolist())
         print(sample_text + "\n")
+
+
+def build_model(vocab_size: int, config: TrainConfig):
+
+    match config.model:
+        case ModelType.BIGRAM:
+            return BigramLM(vocab_size)
+        case ModelType.RNN:
+            # Turns out multiple stacked layers of this model perform poorly, probably a lot
+            # of the input information gets lost passing from layer to layer.
+            return RecurrentLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=1)
+        case ModelType.RNNGRAVES:
+            return RecurrentLMGraves(vocab_size, embed_dim=32, hidden_dim=128, num_layers=8)
+        
+    raise KeyError("Specified model type {config.model} not available.")
+
 
 def main():
     config = TrainConfig()
@@ -124,13 +145,13 @@ def main():
     encoded_text = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
-    #model = BigramLM(len(tokenizer))
-    model = RecurrentLM(len(tokenizer), embed_dim=64, hidden_size=256, num_layers=3)
+    model = build_model(len(tokenizer), config)
+    # model.compile() # issues with shape transforms in ModelType.RNNGRAVES
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
 
     train(model, train_dataset, val_dataset, config)
-    sample_text(model, tokenizer, 50)
+    #sample_text(model, tokenizer, 50)
 
 
 if __name__ == "__main__":
