@@ -12,6 +12,7 @@ from torch.optim.adamw import AdamW
 
 from models import BigramLM, BaseLanguageModel, RecurrentLM, RecurrentLMGraves
 
+torch.set_float32_matmul_precision('high')
 
 _CHARSETS: Final = [" ", string.ascii_letters, string.digits, string.punctuation]
 
@@ -31,7 +32,7 @@ class TrainConfig:
     batch_size: int = 64
     lr: float = 0.01
     shuffle: bool = True
-    context_length: int = 64
+    context_length: int = 96
     model: ModelType = ModelType.RNNGRAVES
     device: str = "cuda"
 
@@ -111,11 +112,11 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
             x, targets = batch
             x, targets = x.to(config.device), targets.to(config.device)
 
+            optimizer.zero_grad(set_to_none=True)
             logits = model(x)
             loss = loss_fn(logits, targets)
             loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
 
             running_loss += loss.item()
             print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1)}")
@@ -154,7 +155,7 @@ def main():
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
     model = build_model(len(tokenizer), config)
-    # model.compile() # issues with shape transforms in ModelType.RNNGRAVES
+    model.compile() # issues with shape transforms in ModelType.RNNGRAVES
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
 

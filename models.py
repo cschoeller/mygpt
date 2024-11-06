@@ -52,6 +52,7 @@ class BigramLM(BaseLanguageModel):
                 token_logits = self(last_tokens)
                 token_probs = torch.softmax(token_logits, dim=-1)
                 pred_tokens = torch.multinomial(input=token_probs, num_samples=1)
+                pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
                 token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
             return token_indices
@@ -109,6 +110,7 @@ class RecurrentLM(BaseLanguageModel):
                 token_logits = self(last_tokens.unsqueeze(-1))
                 token_probs = torch.softmax(token_logits, dim=-1)
                 pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
+                pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
                 token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
             return token_indices
@@ -193,6 +195,7 @@ class RecurrentLMGraves(BaseLanguageModel):
                 token_logits = self(last_tokens.unsqueeze(-1))
                 token_probs = torch.softmax(token_logits, dim=-1)
                 pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
+                pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
                 token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
             return token_indices
