@@ -135,6 +135,7 @@ class RecurrentLMGraves(BaseLanguageModel):
         self._num_layers = num_layers
         self._token_embeddings = nn.Embedding(vocab_size, embed_dim)
         self._rnn_cells = nn.ModuleList(nn.GRUCell(embed_dim + hidden_dim, hidden_size=hidden_dim) for _ in range(num_layers))
+        #self._fcn_connectors = nn.ModuleList(nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU()) for _ in range(num_layers))
         self._h0 = torch.nn.Parameter(torch.rand(size=(num_layers, hidden_dim), dtype=torch.float32))
         self.decoder = nn.Sequential(nn.Linear(hidden_dim, max(hidden_dim//2, vocab_size)),
                                      nn.ReLU(),
@@ -166,6 +167,7 @@ class RecurrentLMGraves(BaseLanguageModel):
 
                 # build input as cat of token embedding and hidden cell state
                 h_cell = curr_cell_h[layer_idx]
+                #h_cell = self._fcn_connectors[layer_idx](h_cell) # dense transform
                 hx = torch.cat([h_cell, curr_token_embed], dim=-1)
 
                 # compute new hidden cell state and update in memory
@@ -174,7 +176,14 @@ class RecurrentLMGraves(BaseLanguageModel):
 
                 # decode and store hidden state of last layer
                 if layer_idx == self._num_layers - 1:
-                    outputs.append(self.decoder(h_new))
+                    # average pool the hidden states of all layers, skip connections
+                    hidden_stack = torch.stack(curr_cell_h, dim=-1) # (B, hidden_dim, L)
+                    #aggregated_hidden = torch.mean(hidden_stack, dim=-1) # (B, hidden_dim)
+                    aggregated_hidden, _ = torch.max(hidden_stack, dim=-1) # (B, hidden_dim)
+                    outputs.append(self.decoder(aggregated_hidden))
+
+                    # old version, only used last cell's hidden state to predict
+                    #outputs.append(self.decoder(h_new))
 
         return torch.stack(outputs, dim=1)
 

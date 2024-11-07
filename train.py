@@ -28,9 +28,9 @@ class ModelType(Enum):
 class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
-    epochs = 3
+    epochs = 5
     batch_size: int = 128
-    lr: float = 0.01
+    lr: float = 0.003
     shuffle: bool = True
     context_length: int = 128
     model: ModelType = ModelType.RNNGRAVES
@@ -141,7 +141,7 @@ def build_model(vocab_size: int, config: TrainConfig):
             # of the input information gets lost passing from layer to layer.
             return RecurrentLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=1)
         case ModelType.RNNGRAVES:
-            return RecurrentLMGraves(vocab_size, embed_dim=32, hidden_dim=256, num_layers=8)
+            return RecurrentLMGraves(vocab_size, embed_dim=64, hidden_dim=256, num_layers=3)
         
     raise KeyError("Specified model type {config.model} not available.")
 
@@ -155,12 +155,12 @@ def main():
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
     model = build_model(len(tokenizer), config)
-    model.compile() # issues with shape transforms in ModelType.RNNGRAVES
+    model.compile() # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
 
     train(model, train_dataset, val_dataset, config)
-    sample_text(model, tokenizer, 300, config)
+    sample_text(model, tokenizer, max_new_tokens=500, config=config)
 
 
 if __name__ == "__main__":
