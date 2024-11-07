@@ -29,10 +29,10 @@ class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
     epochs = 3
-    batch_size: int = 64
+    batch_size: int = 128
     lr: float = 0.01
     shuffle: bool = True
-    context_length: int = 96
+    context_length: int = 128
     model: ModelType = ModelType.RNNGRAVES
     device: str = "cuda"
 
