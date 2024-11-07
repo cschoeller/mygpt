@@ -31,7 +31,7 @@ class TrainConfig:
     p_train: float = 0.9
     epochs = 5
     batch_size: int = 1024
-    lr: float = 0.0003 #0.003
+    lr: float = 0.007 #0.003
     clip_grads: float | None = 1.0
     shuffle: bool = True
     context_length: int = 128

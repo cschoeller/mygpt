@@ -170,7 +170,7 @@ class RecurrentLMGraves(BaseLanguageModel):
                 # build hidden state input by adding state of previous layer
                 h_prev = self._linear_prev(curr_cell_h[layer_idx - 1]) if layer_idx >= 1 else 0.
                 h = self._linear_curr(curr_cell_h[layer_idx])
-                hx = h + h_prev
+                hx = (h + h_prev) / 2.
 
                 # compute new hidden cell state and update in memory
                 h_new = self._rnn_cells[layer_idx](curr_token_embed, hx)
@@ -180,7 +180,8 @@ class RecurrentLMGraves(BaseLanguageModel):
                 if layer_idx == self._num_layers - 1:
                     # average pool the hidden states of all layers, skip connections
                     hidden_stack = torch.stack(curr_cell_h, dim=-1) # (B, hidden_dim, L)
-                    aggregated_hidden, _ = torch.max(hidden_stack, dim=-1) # (B, hidden_dim)
+                    #aggregated_hidden, _ = torch.max(hidden_stack, dim=-1) # (B, hidden_dim)
+                    aggregated_hidden = torch.mean(hidden_stack, dim=-1) # (B, hidden_dim)
                     outputs.append(self.decoder(aggregated_hidden))
 
         return torch.stack(outputs, dim=1)
