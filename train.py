@@ -28,8 +28,8 @@ class ModelType(Enum):
 class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
-    epochs = 5
-    batch_size: int = 128
+    epochs = 10
+    batch_size: int = 512
     lr: float = 0.003
     shuffle: bool = True
     context_length: int = 128
