@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim.adamw import AdamW
+from torch.nn.utils import clip_grad_norm_
 
 from models import BigramLM, BaseLanguageModel, RecurrentLM, RecurrentLMGraves
 
@@ -29,8 +30,9 @@ class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
     epochs = 5
-    batch_size: int = 1024 # -> 21 GB VRAM
+    batch_size: int = 1024
     lr: float = 0.003
+    clip_grads: float | None = 1.0
     shuffle: bool = True
     context_length: int = 128
     model: ModelType = ModelType.RNNGRAVES
@@ -116,6 +118,9 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
             logits = model(x)
             loss = loss_fn(logits, targets)
             loss.backward()
+
+            if config.clip_grads is not None:
+                clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
             optimizer.step()
 
             running_loss += loss.item()
