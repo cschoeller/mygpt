@@ -31,7 +31,7 @@ class TrainConfig:
     p_train: float = 0.9
     epochs = 5
     batch_size: int = 1024
-    lr: float = 0.007 #0.003
+    lr: float = 0.003
     clip_grads: float | None = 1.0
     shuffle: bool = True
     context_length: int = 128
@@ -144,9 +144,9 @@ def build_model(vocab_size: int, config: TrainConfig):
         case ModelType.RNN:
             # Turns out multiple stacked layers of this model perform poorly, probably a lot
             # of the input information gets lost passing from layer to layer.
-            return RecurrentLM(vocab_size, embed_dim=32, hidden_dim=312, num_layers=5)
+            return RecurrentLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
         case ModelType.RNNGRAVES:
-            return RecurrentLMGraves(vocab_size, embed_dim=32, hidden_dim=312, num_layers=5)
+            return RecurrentLMGraves(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
         
     raise KeyError("Specified model type {config.model} not available.")
 

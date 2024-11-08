@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class BaseLanguageModel(nn.Module, ABC):
@@ -71,8 +72,9 @@ class RecurrentLM(BaseLanguageModel):
             num_layers: Number of layers in the stacked GRU.
         """
         super().__init__()
-        self._token_embeddings = nn.Embedding(vocab_size, embed_dim)
-        self._rnn = torch.nn.GRU(input_size=embed_dim, hidden_size=hidden_dim, num_layers=num_layers, batch_first=True)
+        self._vocab_size = vocab_size
+        #self._token_embeddings = nn.Embedding(vocab_size, embed_dim)
+        self._rnn = torch.nn.GRU(input_size=vocab_size, hidden_size=hidden_dim, num_layers=num_layers, batch_first=True)
         self._h0 = torch.nn.Parameter(torch.rand(size=(num_layers, 1, hidden_dim), dtype=torch.float32))
         self.decoder = nn.Sequential(nn.Linear(hidden_dim, hidden_dim),
                                      nn.ReLU(),
@@ -88,9 +90,11 @@ class RecurrentLM(BaseLanguageModel):
             Logits of shape (B, T, V). Where B is batch, T is time in
             the sequence and V is the vocabulary size.
         """
-        encoded_tokens = self._token_embeddings(token_indices)
-        h0 = self._h0.expand(-1, token_indices.shape[0] , -1).contiguous()
-        outputs, _ = self._rnn(encoded_tokens, h0)
+        #encoded_tokens = self._token_embeddings(token_indices)
+        encoded_tokens = F.one_hot(token_indices, num_classes=self._vocab_size).float()
+        #h0 = self._h0.expand(-1, token_indices.shape[0] , -1).contiguous()
+        #outputs, _ = self._rnn(encoded_tokens, h0)
+        outputs, _ = self._rnn(encoded_tokens)
         return self.decoder(outputs)
 
     def generate(self, token_indices: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
@@ -133,9 +137,9 @@ class RecurrentLMGraves(BaseLanguageModel):
             use_fcn_hidden: Process hidden states with a small fcn.
         """
         super().__init__()
+        self._vocab_size = vocab_size
         self._num_layers = num_layers
-        self._token_embeddings = nn.Embedding(vocab_size, embed_dim)
-        self._rnn_cells = nn.ModuleList(nn.GRUCell(embed_dim, hidden_size=hidden_dim) for _ in range(num_layers))
+        self._rnn_cells = nn.ModuleList(nn.GRUCell(vocab_size, hidden_size=hidden_dim) for _ in range(num_layers))
         self._linear_prev = nn.Linear(hidden_dim, hidden_dim)
         self._linear_curr = nn.Linear(hidden_dim, hidden_dim)
         self._h0 = torch.nn.Parameter(torch.rand(size=(num_layers, hidden_dim), dtype=torch.float32))
@@ -155,7 +159,7 @@ class RecurrentLMGraves(BaseLanguageModel):
             Logits of shape (B, T, V). Where B is batch, T is time in
             the sequence and V is the vocabulary size.
         """
-        encoded_tokens = self._token_embeddings(token_indices).permute(1, 0, 2) # seq first
+        encoded_tokens = F.one_hot(token_indices, num_classes=self._vocab_size).float().permute(1, 0, 2) # seq first
 
         outputs = []
         curr_cell_h = [h.unsqueeze(0).expand(token_indices.shape[0], -1).contiguous() for h in self._h0]
@@ -170,7 +174,7 @@ class RecurrentLMGraves(BaseLanguageModel):
                 # build hidden state input by adding state of previous layer
                 h_prev = self._linear_prev(curr_cell_h[layer_idx - 1]) if layer_idx >= 1 else 0.
                 h = self._linear_curr(curr_cell_h[layer_idx])
-                hx = (h + h_prev) / 2.
+                hx = h + h_prev
 
                 # compute new hidden cell state and update in memory
                 h_new = self._rnn_cells[layer_idx](curr_token_embed, hx)
