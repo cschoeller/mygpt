@@ -1,6 +1,4 @@
-from typing import Final
 from dataclasses import dataclass
-import string
 from enum import Enum, auto
 
 import torch
@@ -11,11 +9,12 @@ from torch.utils.data.dataloader import DataLoader
 from torch.optim.adamw import AdamW
 from torch.nn.utils import clip_grad_norm_
 
-from models import BigramLM, BaseLanguageModel, RecurrentLM, RecurrentLMGraves
+from models.base_language_model import BaseLanguageModel
+from models.bigram import BigramLM
+from models.recurrent import RecurrentLM, RecurrentLMGraves
 
-torch.set_float32_matmul_precision('high')
 
-_CHARSETS: Final = [" ", string.ascii_letters, string.digits, string.punctuation]
+torch.set_float32_matmul_precision('high') # tensor core use
 
 
 class ModelType(Enum):
@@ -29,8 +28,8 @@ class ModelType(Enum):
 class TrainConfig:
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
-    epochs = 5
-    batch_size: int = 1024
+    epochs = 10
+    batch_size: int = 512
     lr: float = 0.003
     clip_grads: float | None = 1.0
     shuffle: bool = True
@@ -46,14 +45,9 @@ class CharTokenizer:
 
     def _build_alphabet(self, text: str) -> tuple[dict[str, int], dict[int, str]]:
         chars_in_text = set(text)
-
-        alphabet = set()
-        for charset in _CHARSETS:
-            alphabet.update(charset)
-        alphabet.update(chars_in_text)
-
-        return ({char: i for i, char in enumerate(sorted(alphabet))},
-                {i: char for i, char in enumerate(sorted(alphabet))})
+        vocabulary = sorted(chars_in_text)
+        return ({char: i for i, char in enumerate(vocabulary)},
+                {i: char for i, char in enumerate(vocabulary)})
     
     def encode(self, text: str) -> list[int]:
         return [self._stoi[char] for char in text]
@@ -129,6 +123,7 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
 
 def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int, config: TrainConfig):
     model.to(config.device)
+    model.eval()
     start_tokens = torch.zeros(size=(1,1), dtype=torch.long, device=config.device)
     preds = model.generate(start_tokens, max_new_tokens)
     for pred in preds:
@@ -144,9 +139,9 @@ def build_model(vocab_size: int, config: TrainConfig):
         case ModelType.RNN:
             # Turns out multiple stacked layers of this model perform poorly, probably a lot
             # of the input information gets lost passing from layer to layer.
-            return RecurrentLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
+            return RecurrentLM(vocab_size, hidden_dim=312, num_layers=5)
         case ModelType.RNNGRAVES:
-            return RecurrentLMGraves(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
+            return RecurrentLMGraves(vocab_size, hidden_dim=256, num_layers=5)
         
     raise KeyError("Specified model type {config.model} not available.")
 
