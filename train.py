@@ -11,7 +11,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
-from models.recurrent import RecurrentLM, RecurrentLMGraves
+from models.recurrent import RecurrentLM, RecurrentLMGraves, RecurrentEnsembleLM
 
 
 torch.set_float32_matmul_precision('high') # tensor core use
@@ -21,6 +21,7 @@ class ModelType(Enum):
     BIGRAM = auto()
     RNN = auto()
     RNNGRAVES = auto()
+    RNNENSEMBLE = auto()
     TRANSFORMER = auto()
 
 
@@ -34,7 +35,7 @@ class TrainConfig:
     clip_grads: float | None = 1.0
     shuffle: bool = True
     context_length: int = 128
-    model: ModelType = ModelType.RNNGRAVES
+    model: ModelType = ModelType.RNNENSEMBLE
     device: str = "cuda"
 
 
@@ -139,9 +140,11 @@ def build_model(vocab_size: int, config: TrainConfig):
         case ModelType.RNN:
             # Turns out multiple stacked layers of this model perform poorly, probably a lot
             # of the input information gets lost passing from layer to layer.
-            return RecurrentLM(vocab_size, hidden_dim=312, num_layers=5)
+            return RecurrentLM(vocab_size, hidden_dim=256, num_layers=5)
         case ModelType.RNNGRAVES:
             return RecurrentLMGraves(vocab_size, hidden_dim=256, num_layers=5)
+        case ModelType.RNNENSEMBLE:
+            return RecurrentEnsembleLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
         
     raise KeyError("Specified model type {config.model} not available.")
 
