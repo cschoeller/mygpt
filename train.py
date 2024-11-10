@@ -1,6 +1,8 @@
+from typing import ClassVar
 from dataclasses import dataclass
 from enum import Enum, auto
 from time import time
+import string
 
 import torch
 from torch import nn
@@ -34,8 +36,8 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 1
-    batch_size: int = 1024
+    epochs = 10
+    batch_size: int = 512
     lr: float = 0.003
     clip_grads: float | None = 1.0
     shuffle: bool = True
@@ -46,17 +48,25 @@ class TrainConfig:
     # model
     context_length: int = 128
     model: ModelType = ModelType.RNNENSEMBLE
-    gen_temperature: float = 1.0
+    gen_temperature: float = 0.3
 
 
 
 class CharTokenizer:
+
+    _charset: ClassVar[list[str]] = [" ", string.ascii_letters, string.digits, string.punctuation]
 
     def __init__(self, text: str = "") -> None:
         self._stoi, self._itos = self._build_alphabet(text)
 
     def _build_alphabet(self, text: str) -> tuple[dict[str, int], dict[int, str]]:
         chars_in_text = set(text)
+
+        alphabet = set()
+        for charset in CharTokenizer._charset:
+            alphabet.update(charset)
+        alphabet.update(chars_in_text)
+
         vocabulary = sorted(chars_in_text)
         return ({char: i for i, char in enumerate(vocabulary)},
                 {i: char for i, char in enumerate(vocabulary)})
