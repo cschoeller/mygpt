@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim.adamw import AdamW
+from torch.optim import Optimizer
+from torch.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 
 from models.base_language_model import BaseLanguageModel
@@ -115,6 +117,31 @@ def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return F.cross_entropy(logits, targets)
 
 
+def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
+         loss_fn, scaler: GradScaler, optimizer: Optimizer,
+         config: TrainConfig) -> tuple[float, float]:
+    
+    batch_start = time()
+    x, targets = batch
+    x, targets = x.to(config.device), targets.to(config.device)
+
+    with torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision):
+        logits = model(x)
+        loss = loss_fn(logits, targets)
+
+    optimizer.zero_grad(set_to_none=True)
+    scaler.scale(loss).backward()
+
+    if config.clip_grads is not None:
+        scaler.unscale_(optimizer) # needed for regular clipping
+        clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
+
+    scaler.step(optimizer)
+    scaler.update()
+
+    return loss.item(), (time() - batch_start)
+
+
 def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     model.train()
     model.to(config.device)
@@ -129,26 +156,9 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
         running_loss = 0.
 
         for i, batch in enumerate(train_loader):
-            batch_start = time()
-            x, targets = batch
-            x, targets = x.to(config.device), targets.to(config.device)
+            loss, batch_time = step(batch, model, loss_fn, scaler, optimizer, config)
+            running_loss += loss
 
-            with torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision):
-                logits = model(x)
-                loss = loss_fn(logits, targets)
-
-            optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
-
-            if config.clip_grads is not None:
-                scaler.unscale_(optimizer) # needed for regular clipping
-                clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
-
-            scaler.step(optimizer)
-            scaler.update()
-
-            running_loss += loss.item()
-            batch_time = (time() - batch_start)# / (i + 1)
             print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1):.8f}, s/it {batch_time:.4f}")
 
 
