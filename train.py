@@ -53,7 +53,6 @@ class TrainConfig:
     gen_temperature: float = 0.3
 
 
-
 class CharTokenizer:
 
     _charset: ClassVar[list[str]] = [" ", string.ascii_letters, string.digits, string.punctuation]
@@ -120,7 +119,7 @@ def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
          loss_fn, scaler: GradScaler, optimizer: Optimizer,
          config: TrainConfig) -> tuple[float, float]:
-    
+
     batch_start = time()
     x, targets = batch
     x, targets = x.to(config.device), targets.to(config.device)
@@ -145,8 +144,10 @@ def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
 def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     model.train()
     model.to(config.device)
-
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
+                              shuffle=config.shuffle, num_workers=8,
+                              pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size,
                               shuffle=config.shuffle, num_workers=8,
                               pin_memory=True)
     scaler = torch.amp.GradScaler(device=config.device, enabled=config.mixed_precision)
@@ -159,7 +160,17 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
             loss, batch_time = step(batch, model, loss_fn, scaler, optimizer, config)
             running_loss += loss
 
-            print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1):.8f}, s/it {batch_time:.4f}")
+            val_result = ""
+            if i == len(train_loader) - 1:
+                total_val_loss = 0.
+                for batch in val_loader:
+                    val_loss, _ = step(batch, model, loss_fn, scaler, optimizer, config)
+                    total_val_loss += val_loss
+                val_result = f", {total_val_loss / len(val_loader):.6f}"
+                
+
+            print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1):.6f}" +
+                  val_result + f", s/it {batch_time:.4f}")
 
 
 def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int, config: TrainConfig):
