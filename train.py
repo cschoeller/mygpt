@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, auto
+from time import time
 
 import torch
 from torch import nn
@@ -27,16 +28,26 @@ class ModelType(Enum):
 
 @dataclass
 class TrainConfig:
+
+    # data
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
-    epochs = 10
-    batch_size: int = 512
+
+    # training
+    epochs = 1
+    batch_size: int = 1024
     lr: float = 0.003
     clip_grads: float | None = 1.0
     shuffle: bool = True
+    compile: bool = True
+    mixed_precision: bool = True
+    device: str = "cuda"
+
+    # model
     context_length: int = 128
     model: ModelType = ModelType.RNNENSEMBLE
-    device: str = "cuda"
+    gen_temperature: float = 1.0
+
 
 
 class CharTokenizer:
@@ -101,25 +112,34 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
                               shuffle=config.shuffle, num_workers=8,
                               pin_memory=True)
+    scaler = torch.amp.GradScaler(device=config.device, enabled=config.mixed_precision)
     optimizer = AdamW(model.parameters(), lr=config.lr)
 
     for e in range(1, config.epochs+1):
         running_loss = 0.
+
         for i, batch in enumerate(train_loader):
+            batch_start = time()
             x, targets = batch
             x, targets = x.to(config.device), targets.to(config.device)
 
+            with torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision):
+                logits = model(x)
+                loss = loss_fn(logits, targets)
+
             optimizer.zero_grad(set_to_none=True)
-            logits = model(x)
-            loss = loss_fn(logits, targets)
-            loss.backward()
+            scaler.scale(loss).backward()
 
             if config.clip_grads is not None:
+                scaler.unscale_(optimizer) # needed for regular clipping
                 clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
-            optimizer.step()
+
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item()
-            print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1)}")
+            batch_time = (time() - batch_start)# / (i + 1)
+            print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1):.8f}, s/it {batch_time:.4f}")
 
 
 def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int, config: TrainConfig):
@@ -158,7 +178,9 @@ def main():
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
     model = build_model(len(tokenizer), config)
-    model.compile() # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
+    if config.compile:
+        model.compile() # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
+
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
 

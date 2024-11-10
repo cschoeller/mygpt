@@ -24,12 +24,13 @@ class BigramLM(BaseLanguageModel):
         """
         return self._token_embedding_table(token_indices)
 
-    def generate(self, token_indices: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
+    def generate(self, token_indices: torch.Tensor, max_new_tokens: int, temp: float = 1.0) -> torch.Tensor:
         """Samples max_new_tokens predicted tokens based on the input tokens.
         
         Args:
             token_indices: Sequences of tokens, shape (B, T).
             max_new_tokens: Number of next tokens to predict.
+            temp: Temperature for the softmax. Lower means focus on highest likelihood, higher more diverse.
 
         Returns:
             Concatenation of the input tokens with predicted ones, shape (B, T + max_new_tokens).
@@ -39,7 +40,7 @@ class BigramLM(BaseLanguageModel):
             for _ in range(max_new_tokens):
                 last_tokens = token_indices[:, -1]
                 token_logits = self(last_tokens)
-                token_probs = torch.softmax(token_logits, dim=-1)
+                token_probs = torch.softmax(token_logits/temp, dim=-1)
                 pred_tokens = torch.multinomial(input=token_probs, num_samples=1)
                 pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
                 token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
