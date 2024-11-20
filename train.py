@@ -17,6 +17,7 @@ from torch.nn.utils import clip_grad_norm_
 from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
 from models.recurrent import RecurrentLM, RecurrentLMGraves, RecurrentEnsembleLM
+from models.transformer import Transformer
 
 
 torch.set_float32_matmul_precision('high') # tensor core use
@@ -38,7 +39,7 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 10
+    epochs = 3 #10
     batch_size: int = 512
     lr: float = 0.003
     clip_grads: float | None = 1.0
@@ -49,7 +50,7 @@ class TrainConfig:
 
     # model
     context_length: int = 128
-    model: ModelType = ModelType.RNNENSEMBLE
+    model: ModelType = ModelType.TRANSFORMER
     gen_temperature: float = 0.3
 
 
@@ -196,6 +197,8 @@ def build_model(vocab_size: int, config: TrainConfig):
             return RecurrentLMGraves(vocab_size, hidden_dim=256, num_layers=5)
         case ModelType.RNNENSEMBLE:
             return RecurrentEnsembleLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
+        case ModelType.TRANSFORMER:
+            return Transformer(vocab_size, context_length=config.context_length, embed_dim=32)
         
     raise KeyError("Specified model type {config.model} not available.")
 

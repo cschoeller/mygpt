@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from base_language_model import BaseLanguageModel
+from models.base_language_model import BaseLanguageModel
 
 # enable flash attention if available
 # if torch.backends.cuda.is_flash_attention_available():
@@ -15,13 +15,13 @@ class MultiHeadAttention(nn.Module):
         self._heads = heads
         self._dim_heads = dim_heads if dim_heads is not None else embed_dim
         self._apply_mask = apply_mask
-        self._d = nn.parameter.Buffer(torch.sqrt(torch.tensor(embed_dim)))
+        self._d = nn.parameter.Buffer(torch.tensor(embed_dim**-0.5))
 
         # usually can be computed with one linear layer for qkv, but not with this api
-        self._heads_q = nn.Linear(embed_dim, heads * self._dim_heads) 
-        self._heads_k = nn.Linear(embed_dim, heads * self._dim_heads)
-        self._heads_v = nn.Linear(embed_dim, heads * self._dim_heads)
-        self._soft = nn.Softmax(dim=-1)
+        self._heads_q = nn.Linear(embed_dim, heads * self._dim_heads, bias=False) 
+        self._heads_k = nn.Linear(embed_dim, heads * self._dim_heads, bias=False)
+        self._heads_v = nn.Linear(embed_dim, heads * self._dim_heads, bias=False)
+        self._softmax = nn.Softmax(dim=-1)
         self._head_to_embed = nn.Linear(heads * self._dim_heads, embed_dim)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
@@ -34,9 +34,9 @@ class MultiHeadAttention(nn.Module):
         v = self._heads_v(v).view(B, self._heads, T, self._dim_heads)
 
         # apply attention and squash heads
-        attn = q @ k.transpose(-1, -2) / self._d
+        attn = q @ k.transpose(-1, -2) * self._d
         attn = self._mask_attention(attn)
-        attn = self._soft(attn)
+        attn = self._softmax(attn)
         out_heads = attn @ v # (B, heads, T, dim_heads)
 
         # squash heads
@@ -68,17 +68,17 @@ class SelfAttention(nn.Module):
         return self._attn(q, k, v)
 
 
-
-
 class Transformer(BaseLanguageModel):
     """Stores a lookup table of embeddings per token to model next-token distributions."""
 
     def __init__(self, vocab_size: int, context_length: int, embed_dim: int):
         """Initialize the model."""
         super().__init__()
+        self._context_length = context_length
         self._token_embedding_table = nn.Embedding(vocab_size, embed_dim)
         self._positional_embed = nn.Embedding(context_length, embed_dim)
-        self.lm_head = nn.Linear(embed_dim, vocab_size)
+        self._sa_head = SelfAttention(embed_dim=embed_dim, heads=8, apply_mask=True)
+        self._lm_head = nn.Linear(embed_dim, vocab_size)
 
     def forward(self, token_indices: torch.Tensor):
         """Computes the output logits.
@@ -90,11 +90,12 @@ class Transformer(BaseLanguageModel):
             Logits of shape (B, T, V). Where B is batch, T is time in
             the sequence and V is the vocabulary size.
         """
-        _, T = token_indices.shape
+        *_, T = token_indices.shape
         token_embed = self._token_embedding_table(token_indices) # (B, T, C)
         pos_embed = self._positional_embed(torch.arange(T, device=token_indices.device)) # (T, C) TODO maybe invert order? N,...,0?
         tokens = token_embed + pos_embed
-        logits = self.lm_head(tokens) # (B, T, vocab_size)
+        tokens = self._sa_head(tokens)
+        logits = self._lm_head(tokens) # (B, T, vocab_size)
         return logits
 
     def generate(self, token_indices: torch.Tensor, max_new_tokens: int, temp: float = 1.0) -> torch.Tensor:
@@ -111,11 +112,10 @@ class Transformer(BaseLanguageModel):
         with torch.no_grad():
 
             for _ in range(max_new_tokens):
-                last_tokens = token_indices[:, -1]
+                last_tokens = token_indices[:, -self._context_length:]
                 token_logits = self(last_tokens)
                 token_probs = torch.softmax(token_logits/temp, dim=-1)
-                pred_tokens = torch.multinomial(input=token_probs, num_samples=1)
-                pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
+                pred_tokens = torch.multinomial(input=token_probs[:, -1], num_samples=1)
                 token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
             return token_indices
@@ -123,9 +123,8 @@ class Transformer(BaseLanguageModel):
 
 # transformer = Transformer(12, 10, 32)
 # x = torch.randint(0, 12, size=(2, 10))
-# y = transformer(x)
-# print(y.shape)
-
+# start_tokens = torch.zeros(size=(1,1), dtype=torch.long)
+# s = transformer.generate(start_tokens, 5)
 
 # x = torch.randn(size=(2, 10, 5))
 # self_attn = SelfAttention(embed_dim=5, heads=3, dim_heads=None, apply_mask=True)
