@@ -18,6 +18,7 @@ from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
 from models.recurrent import RecurrentLM, RecurrentLMGraves, RecurrentEnsembleLM
 from models.transformer import Transformer
+from models.gpt import KarpathyGPT
 
 
 torch.set_float32_matmul_precision('high') # tensor core use
@@ -29,6 +30,7 @@ class ModelType(Enum):
     RNNGRAVES = auto()
     RNNENSEMBLE = auto()
     TRANSFORMER = auto()
+    KARPATHY = auto()
 
 
 @dataclass
@@ -39,19 +41,23 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 10
-    batch_size: int = 512
-    lr: float = 1e-3 #0.003
-    clip_grads: float | None = 1.0
+    epochs = 1 #10
+    batch_size: int = 64
+    lr: float = 1e-3
+    clip_grads: float | None = 1
     shuffle: bool = True
     compile: bool = True
     mixed_precision: bool = True
     device: str = "cuda"
 
+    # regularization
+    weight_decay: float = 0.01 # default
+    dropout: float = 0.2 # transformer
+
     # model
-    context_length: int = 128
+    context_length: int = 256
     model: ModelType = ModelType.TRANSFORMER
-    gen_temperature: float = 0.3
+    gen_temperature: float = 1.0
 
 
 class CharTokenizer:
@@ -64,10 +70,10 @@ class CharTokenizer:
     def _build_alphabet(self, text: str) -> tuple[dict[str, int], dict[int, str]]:
         chars_in_text = set(text)
 
-        alphabet = set()
-        for charset in CharTokenizer._charset:
-            alphabet.update(charset)
-        alphabet.update(chars_in_text)
+        # alphabet = set()
+        # for charset in CharTokenizer._charset:
+        #     alphabet.update(charset)
+        # alphabet.update(chars_in_text)
 
         vocabulary = sorted(chars_in_text)
         return ({char: i for i, char in enumerate(vocabulary)},
@@ -152,7 +158,7 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
                               shuffle=config.shuffle, num_workers=8,
                               pin_memory=True)
     scaler = torch.amp.GradScaler(device=config.device, enabled=config.mixed_precision)
-    optimizer = AdamW(model.parameters(), lr=config.lr)
+    optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
     for e in range(1, config.epochs+1):
         running_loss = 0.
@@ -178,7 +184,6 @@ def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_toke
     model.to(config.device)
     model.eval()
     start_tokens = torch.zeros(size=(1,1), dtype=torch.long, device=config.device)
-    #start_tokens = torch.tensor(tokenizer.encode("Dear Juliet, "), device=config.device).view(1, -1)
     preds = model.generate(start_tokens, max_new_tokens)
     for pred in preds:
         sample_text = tokenizer.decode(pred[1:].tolist())
@@ -199,7 +204,10 @@ def build_model(vocab_size: int, config: TrainConfig):
         case ModelType.RNNENSEMBLE:
             return RecurrentEnsembleLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
         case ModelType.TRANSFORMER:
-            return Transformer(vocab_size, context_length=config.context_length, embed_dim=256, heads=6, layers=6)
+            return Transformer(vocab_size, context_length=config.context_length, embed_dim=384,
+                               heads=6, layers=6, drop_rate=config.dropout)
+        case ModelType.KARPATHY:
+            return KarpathyGPT()
         
     raise KeyError("Specified model type {config.model} not available.")
 
@@ -213,8 +221,8 @@ def main():
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
     model = build_model(len(tokenizer), config)
-    if config.compile:
-        model.compile() # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
+    # if config.compile:
+    #     model.compile() # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
