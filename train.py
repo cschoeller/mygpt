@@ -39,9 +39,9 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 3 #10
+    epochs = 10
     batch_size: int = 512
-    lr: float = 0.003
+    lr: float = 1e-3 #0.003
     clip_grads: float | None = 1.0
     shuffle: bool = True
     compile: bool = True
@@ -167,7 +167,7 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
                 for batch in val_loader:
                     val_loss, _ = step(batch, model, loss_fn, scaler, optimizer, config)
                     total_val_loss += val_loss
-                val_result = f", {total_val_loss / len(val_loader):.6f}"
+                val_result = f", val_loss {total_val_loss / len(val_loader):.6f}"
                 
 
             print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1):.6f}" +
@@ -178,6 +178,7 @@ def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_toke
     model.to(config.device)
     model.eval()
     start_tokens = torch.zeros(size=(1,1), dtype=torch.long, device=config.device)
+    #start_tokens = torch.tensor(tokenizer.encode("Dear Juliet, "), device=config.device).view(1, -1)
     preds = model.generate(start_tokens, max_new_tokens)
     for pred in preds:
         sample_text = tokenizer.decode(pred[1:].tolist())
@@ -198,7 +199,7 @@ def build_model(vocab_size: int, config: TrainConfig):
         case ModelType.RNNENSEMBLE:
             return RecurrentEnsembleLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
         case ModelType.TRANSFORMER:
-            return Transformer(vocab_size, context_length=config.context_length, embed_dim=32)
+            return Transformer(vocab_size, context_length=config.context_length, embed_dim=256, heads=6, layers=6)
         
     raise KeyError("Specified model type {config.model} not available.")
 

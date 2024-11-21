@@ -22,7 +22,7 @@ class MultiHeadAttention(nn.Module):
         self._heads_k = nn.Linear(embed_dim, heads * self._dim_heads, bias=False)
         self._heads_v = nn.Linear(embed_dim, heads * self._dim_heads, bias=False)
         self._softmax = nn.Softmax(dim=-1)
-        self._head_to_embed = nn.Linear(heads * self._dim_heads, embed_dim)
+        self._head_to_embed = nn.Linear(heads * self._dim_heads, embed_dim, bias=False)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         # q, k, v of shape (B, T, C)
@@ -47,7 +47,7 @@ class MultiHeadAttention(nn.Module):
     def _mask_attention(self, attn: torch.Tensor):
         if not self._apply_mask:
             return attn
-
+        
         T = attn.shape[-1]
         tril = torch.tril(torch.ones(size=(T, T), device=attn.device))
         attn = attn.masked_fill(tril == 0., value=float("-inf"))
@@ -58,7 +58,7 @@ class SelfAttention(nn.Module):
 
     def __init__(self, embed_dim: int, heads: int = 1, dim_heads: int | None = None, apply_mask: bool = False):
         super().__init__()
-        self._qkv_embed = nn.Linear(embed_dim, 3 * embed_dim)
+        self._qkv_embed = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
         self._attn = MultiHeadAttention(embed_dim=embed_dim, heads=heads, dim_heads=dim_heads, apply_mask=apply_mask)
 
     def forward(self, tokens: torch.Tensor):
@@ -68,16 +68,43 @@ class SelfAttention(nn.Module):
         return self._attn(q, k, v)
 
 
+class FeedForward(nn.Module):
+
+    def __init__(self, embed_dim: int):
+        super().__init__()
+        self._net = nn.Sequential(nn.Linear(embed_dim, embed_dim),
+                                  nn.ReLU())
+    
+    def forward(self, x: torch.Tensor):
+        return self._net(x)
+    
+
+class TransformerLayer(nn.Module):
+
+    def __init__(self, embed_dim: int, heads: int):
+        super().__init__()
+        self._pre_norm = nn.LayerNorm(embed_dim)
+        self._sa = SelfAttention(embed_dim=embed_dim, heads=heads, dim_heads=embed_dim//heads, apply_mask=True)
+        self._ffnet = FeedForward(embed_dim=embed_dim)
+    
+    def forward(self, tokens: torch.Tensor):
+        out_tokens = self._pre_norm(tokens)
+        out_tokens = self._sa(out_tokens)
+        return tokens + self._ffnet(out_tokens)
+
+
 class Transformer(BaseLanguageModel):
     """Stores a lookup table of embeddings per token to model next-token distributions."""
 
-    def __init__(self, vocab_size: int, context_length: int, embed_dim: int):
+    def __init__(self, vocab_size: int, context_length: int, embed_dim: int, heads: int, layers: int):
         """Initialize the model."""
         super().__init__()
         self._context_length = context_length
         self._token_embedding_table = nn.Embedding(vocab_size, embed_dim)
         self._positional_embed = nn.Embedding(context_length, embed_dim)
-        self._sa_head = SelfAttention(embed_dim=embed_dim, heads=8, apply_mask=True)
+        self._sa_head = nn.Sequential(*(TransformerLayer(embed_dim=embed_dim, heads=heads)
+                                      for _ in range(layers)))
+        self._post_norm = nn.LayerNorm(embed_dim)
         self._lm_head = nn.Linear(embed_dim, vocab_size)
 
     def forward(self, token_indices: torch.Tensor):
@@ -92,9 +119,10 @@ class Transformer(BaseLanguageModel):
         """
         *_, T = token_indices.shape
         token_embed = self._token_embedding_table(token_indices) # (B, T, C)
-        pos_embed = self._positional_embed(torch.arange(T, device=token_indices.device)) # (T, C) TODO maybe invert order? N,...,0?
+        pos_embed = self._positional_embed(torch.arange(T, device=token_indices.device)) # (T, C) TODO maybe invert order?
         tokens = token_embed + pos_embed
         tokens = self._sa_head(tokens)
+        tokens = self._post_norm(tokens)
         logits = self._lm_head(tokens) # (B, T, vocab_size)
         return logits
 
@@ -109,24 +137,20 @@ class Transformer(BaseLanguageModel):
         Returns:
             Concatenation of the input tokens with predicted ones, shape (B, T + max_new_tokens).
         """
+
         with torch.no_grad():
 
             for _ in range(max_new_tokens):
                 last_tokens = token_indices[:, -self._context_length:]
                 token_logits = self(last_tokens)
-                token_probs = torch.softmax(token_logits/temp, dim=-1)
-                pred_tokens = torch.multinomial(input=token_probs[:, -1], num_samples=1)
+                pred_logits = token_logits[:, -1]
+                token_probs = torch.softmax(pred_logits/temp, dim=-1)
+                pred_tokens = torch.multinomial(input=token_probs, num_samples=1)
                 token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
             return token_indices
 
-
-# transformer = Transformer(12, 10, 32)
-# x = torch.randint(0, 12, size=(2, 10))
-# start_tokens = torch.zeros(size=(1,1), dtype=torch.long)
-# s = transformer.generate(start_tokens, 5)
-
-# x = torch.randn(size=(2, 10, 5))
-# self_attn = SelfAttention(embed_dim=5, heads=3, dim_heads=None, apply_mask=True)
-# y = self_attn(x)
-# print(x.shape, y.shape)
+# TODO:
+# Feed forward between softmax
+# Layer normalization
+# Bug in generation? Looks off compared to loss.
