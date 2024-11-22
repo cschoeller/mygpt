@@ -131,20 +131,25 @@ def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
     x, targets = batch
     x, targets = x.to(config.device), targets.to(config.device)
 
-    with torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision):
-        logits = model(x)
-        loss = loss_fn(logits, targets)
+    @torch.compile(disable=not config.compile) # modest 10 ms for optimizer compilation
+    def _compiled_step() -> torch.Tensor:
+        with torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision):
+            logits = model(x)
+            loss = loss_fn(logits, targets)
 
-    optimizer.zero_grad(set_to_none=True)
-    scaler.scale(loss).backward()
+        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
 
-    if config.clip_grads is not None:
-        scaler.unscale_(optimizer) # needed for regular clipping
-        clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
+        if config.clip_grads is not None:
+            scaler.unscale_(optimizer) # needed for regular clipping
+            clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
 
-    scaler.step(optimizer)
-    scaler.update()
+        scaler.step(optimizer)
+        scaler.update()
 
+        return loss
+    
+    loss = _compiled_step()
     return loss.item(), (time() - batch_start)
 
 
@@ -223,15 +228,12 @@ def main():
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
     model = build_model(len(tokenizer), config)
-    train_model = model
-    if config.compile:
-        train_model = torch.compile(model) # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
 
-    train(train_model, train_dataset, val_dataset, config)
-    sample_text(train_model, tokenizer, max_new_tokens=1000, config=config)
+    train(model, train_dataset, val_dataset, config)
+    sample_text(model, tokenizer, max_new_tokens=1000, config=config)
 
     torch.save(model.state_dict(), f"{config.model.name.lower()}_checkpoint_{config.epochs}ep.pt")
 
