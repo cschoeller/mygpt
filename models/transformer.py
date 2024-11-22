@@ -10,10 +10,10 @@ from models.base_language_model import BaseLanguageModel
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, embed_dim: int, heads, drop_rate: float, dim_heads: int | None = None, apply_mask: bool = False, ):
+    def __init__(self, embed_dim: int, heads, drop_rate: float, apply_mask: bool = False):
         super().__init__()
         self._heads = heads
-        self._dim_heads = dim_heads if dim_heads is not None else embed_dim
+        self._dim_heads = embed_dim // heads
         self._apply_mask = apply_mask
         self._d = nn.parameter.Buffer(torch.tensor(embed_dim**-0.5))
 
@@ -30,9 +30,10 @@ class MultiHeadAttention(nn.Module):
 
         # embed into the specified number of heads
         B, T, _ = q.shape
-        q = self._heads_q(q).view(B, self._heads, T, self._dim_heads)
-        k = self._heads_k(k).view(B, self._heads, T, self._dim_heads)
-        v = self._heads_v(v).view(B, self._heads, T, self._dim_heads)
+
+        q = self._heads_q(q).view(B, T, self._heads, self._dim_heads).transpose(1, 2)
+        k = self._heads_k(k).view(B, T, self._heads, self._dim_heads).transpose(1, 2)
+        v = self._heads_v(v).view(B, T, self._heads, self._dim_heads).transpose(1, 2)
 
         # apply attention and squash heads
         attn = q @ k.transpose(-1, -2) * self._d
@@ -58,16 +59,16 @@ class MultiHeadAttention(nn.Module):
 
 class SelfAttention(nn.Module):
 
-    def __init__(self, embed_dim: int, heads: int, drop_rate: float, dim_heads: int | None = None, apply_mask: bool = False):
+    def __init__(self, embed_dim: int, heads: int, drop_rate: float, apply_mask: bool = False):
         super().__init__()
         self._qkv_embed = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
-        self._attn = MultiHeadAttention(embed_dim=embed_dim, heads=heads, dim_heads=dim_heads, apply_mask=apply_mask, drop_rate=drop_rate)
+        self._attn = MultiHeadAttention(embed_dim=embed_dim, heads=heads, apply_mask=apply_mask, drop_rate=drop_rate)
         self._dropout = nn.Dropout(drop_rate)
 
     def forward(self, tokens: torch.Tensor):
         # tokens (B, T, C)
         qkv = self._qkv_embed(tokens)
-        q, k, v = torch.tensor_split(qkv, 3, dim=-1)
+        q, k, v = torch.chunk(qkv, 3, dim=-1) #torch.tensor_split(qkv, 3, dim=-1)
         out = self._attn(q, k, v)
         return self._dropout(out)
 
@@ -91,7 +92,7 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self._ln1 = nn.LayerNorm(embed_dim)
         self._ln2 = nn.LayerNorm(embed_dim)
-        self._sa = SelfAttention(embed_dim=embed_dim, heads=heads, dim_heads=embed_dim//heads, apply_mask=True, drop_rate=drop_rate)
+        self._sa = SelfAttention(embed_dim=embed_dim, heads=heads, apply_mask=True, drop_rate=drop_rate)
         self._ffnet = FeedForward(embed_dim=embed_dim, drop_rate=drop_rate)
     
     def forward(self, tokens: torch.Tensor):
@@ -103,14 +104,14 @@ class TransformerLayer(nn.Module):
 class Transformer(BaseLanguageModel):
     """Stores a lookup table of embeddings per token to model next-token distributions."""
 
-    def __init__(self, vocab_size: int, context_length: int, embed_dim: int, heads: int, layers: int, drop_rate: float = 0.0):
+    def __init__(self, vocab_size: int, context_length: int, embed_dim: int, heads: int, n_layers: int, drop_rate: float = 0.0):
         """Initialize the model."""
         super().__init__()
         self._context_length = context_length
         self._token_embedding_table = nn.Embedding(vocab_size, embed_dim)
         self._positional_embed = nn.Embedding(context_length, embed_dim)
         self._sa_head = nn.Sequential(*(TransformerLayer(embed_dim=embed_dim, heads=heads, drop_rate=drop_rate)
-                                      for _ in range(layers)))
+                                      for _ in range(n_layers)))
         self._norm = nn.LayerNorm(embed_dim)
         self._lm_head = nn.Linear(embed_dim, vocab_size)
 
@@ -134,7 +135,7 @@ class Transformer(BaseLanguageModel):
         token_pos_indices = torch.arange(T, device=token_indices.device)
         pos_embed = self._positional_embed(token_pos_indices) # (T, C)
         tokens = token_embed + pos_embed # (B, T, embed_dim)
-        #tokens = self._sa_head(tokens) # (B, T, embed_dim)
+        tokens = self._sa_head(tokens) # (B, T, embed_dim)
         tokens = self._norm(tokens) # (B, T, embed_dim)
         return self._lm_head(tokens) # (B, T, vocab_size)
 

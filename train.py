@@ -205,7 +205,7 @@ def build_model(vocab_size: int, config: TrainConfig):
             return RecurrentEnsembleLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
         case ModelType.TRANSFORMER:
             return Transformer(vocab_size, context_length=config.context_length, embed_dim=384,
-                               heads=6, layers=6, drop_rate=config.dropout)
+                               heads=6, n_layers=6, drop_rate=config.dropout)
         case ModelType.KARPATHY:
             return KarpathyGPT()
         
@@ -221,8 +221,8 @@ def main():
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
     model = build_model(len(tokenizer), config)
-    # if config.compile:
-    #     model.compile() # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
+    if config.compile:
+        model.compile() # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
