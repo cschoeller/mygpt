@@ -41,7 +41,7 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 1 #10
+    epochs = 1
     batch_size: int = 64
     lr: float = 1e-3
     clip_grads: float | None = 1
@@ -51,8 +51,8 @@ class TrainConfig:
     device: str = "cuda"
 
     # regularization
-    weight_decay: float = 0.01 # default
-    dropout: float = 0.2 # transformer
+    weight_decay: float = 0.1
+    dropout: float = 0.5 # transformer
 
     # model
     context_length: int = 256
@@ -151,6 +151,7 @@ def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
 def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     model.train()
     model.to(config.device)
+
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
                               shuffle=config.shuffle, num_workers=8,
                               pin_memory=True)
@@ -184,7 +185,8 @@ def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_toke
     model.to(config.device)
     model.eval()
     start_tokens = torch.zeros(size=(1,1), dtype=torch.long, device=config.device)
-    preds = model.generate(start_tokens, max_new_tokens)
+    #start_tokens = torch.tensor(tokenizer.encode("Dear Juliet, "), dtype=torch.long, device=config.device).view(1, -1)
+    preds = model.generate(start_tokens, max_new_tokens, config.gen_temperature)
     for pred in preds:
         sample_text = tokenizer.decode(pred[1:].tolist())
         print(sample_text + "\n")
@@ -221,14 +223,21 @@ def main():
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
     model = build_model(len(tokenizer), config)
+    train_model = model
     if config.compile:
-        model.compile() # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
+        train_model = torch.compile(model) # issues with shape transforms in ModelType.RNNGRAVES on 'cpu'
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
 
-    train(model, train_dataset, val_dataset, config)
-    sample_text(model, tokenizer, max_new_tokens=500, config=config)
+    train(train_model, train_dataset, val_dataset, config)
+    sample_text(train_model, tokenizer, max_new_tokens=1000, config=config)
+
+    torch.save(model.state_dict(), f"{config.model.name.lower()}_checkpoint_{config.epochs}ep.pt")
+
+    # model.load_state_dict(torch.load("transformer_checkpoint_5ep.pt", weights_only=True))
+    sample_text(model, tokenizer, max_new_tokens=1000, config=config)
+
 
 
 if __name__ == "__main__":
