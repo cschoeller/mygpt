@@ -22,7 +22,7 @@ from models.transformer_v2 import TransformerV2
 from models.gpt import KarpathyGPT
 
 
-#torch.set_float32_matmul_precision('high') # use tensor cores
+torch.set_float32_matmul_precision('high') # enable tensor cores
 
 
 class ModelType(Enum):
@@ -43,7 +43,7 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 1
+    epochs = 5
     batch_size: int = 64
     lr: float = 1e-3
     clip_grads: float | None = 1
@@ -127,31 +127,35 @@ def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
 def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
          loss_fn, scaler: GradScaler, optimizer: Optimizer,
-         config: TrainConfig) -> tuple[float, float]:
+         config: TrainConfig, is_train: bool = True) -> tuple[float, float]:
 
     batch_start = time()
     x, targets = batch
     x, targets = x.to(config.device), targets.to(config.device)
 
-    @torch.compile(disable=not config.compile) # modest 10 ms for optimizer compilation
-    def _compiled_step() -> torch.Tensor:
-        with torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision):
+    # some speedup from optimizer compilation, reduce-overhead (cuda graphs)
+    # and disabling grad in validation
+    @torch.compile(disable=not config.compile, mode="reduce-overhead")
+    def _compiled_step(is_train: bool) -> torch.Tensor:
+        with (torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision),
+            torch.set_grad_enabled(is_train)):
             logits = model(x)
             loss = loss_fn(logits, targets)
 
-        optimizer.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
+        if is_train:
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
 
-        if config.clip_grads is not None:
-            scaler.unscale_(optimizer) # needed for regular clipping
-            clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
+            if config.clip_grads is not None:
+                scaler.unscale_(optimizer) # needed for regular clipping
+                clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
 
-        scaler.step(optimizer)
-        scaler.update()
+            scaler.step(optimizer)
+            scaler.update()
 
         return loss
     
-    loss = _compiled_step()
+    loss = _compiled_step(is_train)
     return loss.item(), (time() - batch_start)
 
 
@@ -179,7 +183,7 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
             if i == len(train_loader) - 1:
                 total_val_loss = 0.
                 for batch in val_loader:
-                    val_loss, _ = step(batch, model, loss_fn, scaler, optimizer, config)
+                    val_loss, _ = step(batch, model, loss_fn, scaler, optimizer, config, is_train=False)
                     total_val_loss += val_loss
                 val_result = f", val_loss {total_val_loss / len(val_loader):.6f}"
                 
