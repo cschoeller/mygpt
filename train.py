@@ -18,10 +18,11 @@ from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
 from models.recurrent import RecurrentLM, RecurrentLMGraves, RecurrentEnsembleLM
 from models.transformer import Transformer
+from models.transformer_v2 import TransformerV2
 from models.gpt import KarpathyGPT
 
 
-torch.set_float32_matmul_precision('high') # tensor core use
+#torch.set_float32_matmul_precision('high') # use tensor cores
 
 
 class ModelType(Enum):
@@ -30,6 +31,7 @@ class ModelType(Enum):
     RNNGRAVES = auto()
     RNNENSEMBLE = auto()
     TRANSFORMER = auto()
+    TRANSFORMERV2 = auto()
     KARPATHY = auto()
 
 
@@ -56,7 +58,7 @@ class TrainConfig:
 
     # model
     context_length: int = 256
-    model: ModelType = ModelType.TRANSFORMER
+    model: ModelType = ModelType.TRANSFORMERV2
     gen_temperature: float = 1.0
 
 
@@ -190,7 +192,6 @@ def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_toke
     model.to(config.device)
     model.eval()
     start_tokens = torch.zeros(size=(1,1), dtype=torch.long, device=config.device)
-    #start_tokens = torch.tensor(tokenizer.encode("Dear Juliet, "), dtype=torch.long, device=config.device).view(1, -1)
     preds = model.generate(start_tokens, max_new_tokens, config.gen_temperature)
     for pred in preds:
         sample_text = tokenizer.decode(pred[1:].tolist())
@@ -212,6 +213,9 @@ def build_model(vocab_size: int, config: TrainConfig):
             return RecurrentEnsembleLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
         case ModelType.TRANSFORMER:
             return Transformer(vocab_size, context_length=config.context_length, embed_dim=384,
+                               heads=6, n_layers=6, drop_rate=config.dropout)
+        case ModelType.TRANSFORMERV2:
+            return TransformerV2(vocab_size, context_length=config.context_length, embed_dim=384,
                                heads=6, n_layers=6, drop_rate=config.dropout)
         case ModelType.KARPATHY:
             return KarpathyGPT()
@@ -239,7 +243,6 @@ def main():
 
     # model.load_state_dict(torch.load("transformer_checkpoint_5ep.pt", weights_only=True))
     sample_text(model, tokenizer, max_new_tokens=1000, config=config)
-
 
 
 if __name__ == "__main__":
