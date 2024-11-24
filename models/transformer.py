@@ -61,15 +61,12 @@ class SelfAttention(nn.Module):
 
     def __init__(self, embed_dim: int, heads: int, drop_rate: float, apply_mask: bool = False):
         super().__init__()
-        self._qkv_embed = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
         self._attn = MultiHeadAttention(embed_dim=embed_dim, heads=heads, apply_mask=apply_mask, drop_rate=drop_rate)
         self._dropout = nn.Dropout(drop_rate)
 
     def forward(self, tokens: torch.Tensor):
         # tokens (B, T, C)
-        qkv = self._qkv_embed(tokens)
-        q, k, v = torch.chunk(qkv, 3, dim=-1) #torch.tensor_split(qkv, 3, dim=-1)
-        out = self._attn(q, k, v)
+        out = self._attn(q=tokens, k=tokens, v=tokens)
         return self._dropout(out)
 
 
@@ -127,11 +124,6 @@ class Transformer(BaseLanguageModel):
         """
         *_, T = token_indices.shape
         token_embed = self._token_embedding_table(token_indices) # (B, T, C)
-
-        # Originally we used indices from 0,..,n, now we use n,...,0 and it seems to work better.
-        # Is the network paying more attention to the past receiving higher indices?
-        # token_pos_indices = torch.arange(self._context_length - T, self._context_length, device=token_indices.device)
-
         token_pos_indices = torch.arange(T, device=token_indices.device)
         pos_embed = self._positional_embed(token_pos_indices) # (T, C)
         tokens = token_embed + pos_embed # (B, T, embed_dim)
@@ -139,6 +131,7 @@ class Transformer(BaseLanguageModel):
         tokens = self._norm(tokens) # (B, T, embed_dim)
         return self._lm_head(tokens) # (B, T, vocab_size)
 
+    @torch.no_grad()
     def generate(self, token_indices: torch.Tensor, max_new_tokens: int, temp: float = 1.0) -> torch.Tensor:
         """Samples max_new_tokens predicted tokens based on the input tokens.
         
@@ -151,14 +144,12 @@ class Transformer(BaseLanguageModel):
             Concatenation of the input tokens with predicted ones, shape (B, T + max_new_tokens).
         """
 
-        with torch.no_grad():
+        for _ in range(max_new_tokens):
+            last_tokens = token_indices[:, -self._context_length:]
+            token_logits = self(last_tokens)
+            pred_logits = token_logits[:, -1]
+            token_probs = torch.softmax(pred_logits/temp, dim=-1)
+            pred_tokens = torch.multinomial(input=token_probs, num_samples=1)
+            token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
-            for _ in range(max_new_tokens):
-                last_tokens = token_indices[:, -self._context_length:]
-                token_logits = self(last_tokens)
-                pred_logits = token_logits[:, -1]
-                token_probs = torch.softmax(pred_logits/temp, dim=-1)
-                pred_tokens = torch.multinomial(input=token_probs, num_samples=1)
-                token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
-
-            return token_indices
+        return token_indices

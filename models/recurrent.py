@@ -45,7 +45,7 @@ class RecurrentLM(BaseLanguageModel):
 
         return self.decoder(outputs), hidden
 
-
+    @torch.no_grad()
     def generate(self, token_indices: torch.Tensor, max_new_tokens: int, temp: float = 1.0) -> torch.Tensor:
         """Samples max_new_tokens predicted tokens based on the input tokens.
         
@@ -60,20 +60,18 @@ class RecurrentLM(BaseLanguageModel):
         assert not self.training, "No text generation in training mode."
         input_seq_length = token_indices.shape[1]
 
-        with torch.no_grad():
-            
-            hidden = None
-            for i in range(input_seq_length + max_new_tokens):
-                next_token = token_indices[:, i]
-                token_logits, hidden = self(next_token.unsqueeze(-1), hidden)
+        hidden = None
+        for i in range(input_seq_length + max_new_tokens):
+            next_token = token_indices[:, i]
+            token_logits, hidden = self(next_token.unsqueeze(-1), hidden)
 
-                if i >= input_seq_length -1 : # start generating
-                    token_probs = torch.softmax(token_logits/temp, dim=-1)
-                    pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
-                    pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
-                    token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
+            if i >= input_seq_length -1 : # start generating
+                token_probs = torch.softmax(token_logits/temp, dim=-1)
+                pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
+                pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
+                token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
-            return token_indices
+        return token_indices
 
 
 
@@ -149,6 +147,7 @@ class RecurrentLMGraves(BaseLanguageModel):
 
         return torch.stack(outputs, dim=1), curr_cell_h
 
+    @torch.no_grad()
     def generate(self, token_indices: torch.Tensor, max_new_tokens: int, temp: float = 1.0) -> torch.Tensor:
         """Samples max_new_tokens predicted tokens based on the input tokens.
         
@@ -163,23 +162,19 @@ class RecurrentLMGraves(BaseLanguageModel):
         assert not self.training, "No text generation in training mode."
         input_seq_length = token_indices.shape[1]
 
-        with torch.no_grad():
             
-            hidden = None
-            for i in range(input_seq_length + max_new_tokens):
-                next_token = token_indices[:, i]
-                token_logits, hidden = self(next_token.unsqueeze(-1), hidden)
+        hidden = None
+        for i in range(input_seq_length + max_new_tokens):
+            next_token = token_indices[:, i]
+            token_logits, hidden = self(next_token.unsqueeze(-1), hidden)
 
-                if i >= input_seq_length -1 : # start generating
-                    token_probs = torch.softmax(token_logits/temp, dim=-1)
-                    pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
-                    pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
-                    token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
+            if i >= input_seq_length -1 : # start generating
+                token_probs = torch.softmax(token_logits/temp, dim=-1)
+                pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
+                pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
+                token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
-            return token_indices
-
-
-
+        return token_indices
 
 
 class RecurrentEnsembleLM(BaseLanguageModel):
@@ -254,7 +249,7 @@ class RecurrentEnsembleLM(BaseLanguageModel):
 
         return torch.stack(outputs, dim=1), curr_cell_h
 
-
+    @torch.no_grad()
     def generate(self, token_indices: torch.Tensor, max_new_tokens: int, temp: float = 1.0) -> torch.Tensor:
         """Samples max_new_tokens predicted tokens based on the input tokens.
         
@@ -269,17 +264,15 @@ class RecurrentEnsembleLM(BaseLanguageModel):
         assert not self.training, "No text generation in training mode."
         input_seq_length = token_indices.shape[1]
 
-        with torch.no_grad():
-            
-            hidden = None
-            for i in range(input_seq_length + max_new_tokens):
-                next_token = token_indices[:, i]
-                token_logits, hidden = self(next_token.unsqueeze(-1), hidden)
+        hidden = None
+        for i in range(input_seq_length + max_new_tokens):
+            next_token = token_indices[:, i]
+            token_logits, hidden = self(next_token.unsqueeze(-1), hidden)
 
-                if i >= input_seq_length -1 : # start generating
-                    token_probs = torch.softmax(token_logits/temp, dim=-1)
-                    pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
-                    pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
-                    token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
+            if i >= input_seq_length -1 : # start generating
+                token_probs = torch.softmax(token_logits/temp, dim=-1)
+                pred_tokens = torch.multinomial(input=token_probs.squeeze(), num_samples=1)
+                pred_tokens = pred_tokens.unsqueeze(0) if len(pred_tokens.shape) == 1 else pred_tokens
+                token_indices = torch.cat([token_indices, pred_tokens], dim=-1)
 
-            return token_indices
+        return token_indices

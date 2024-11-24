@@ -14,6 +14,7 @@ from torch.optim import Optimizer
 from torch.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 
+from tokenizers.char_tokenizer import CharTokenizer
 from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
 from models.recurrent import RecurrentLM, RecurrentLMGraves, RecurrentEnsembleLM
@@ -23,6 +24,10 @@ from models.gpt import KarpathyGPT
 
 
 torch.set_float32_matmul_precision('high') # enable tensor cores
+
+if torch.backends.cuda.is_flash_attention_available():
+    torch.backends.cuda.enable_flash_sdp(enabled=True)
+    torch.backends.cuda.enable_mem_efficient_sdp(enabled=True)
 
 
 class ModelType(Enum):
@@ -53,43 +58,13 @@ class TrainConfig:
     device: str = "cuda"
 
     # regularization
-    weight_decay: float = 0.1
-    dropout: float = 0.5 # transformer
+    weight_decay: float = 0.01
+    dropout: float = 0.2 # transformer
 
     # model
     context_length: int = 256
     model: ModelType = ModelType.TRANSFORMERV2
     gen_temperature: float = 1.0
-
-
-class CharTokenizer:
-
-    _charset: ClassVar[list[str]] = [" ", string.ascii_letters, string.digits, string.punctuation]
-
-    def __init__(self, text: str = "") -> None:
-        self._stoi, self._itos = self._build_alphabet(text)
-
-    def _build_alphabet(self, text: str) -> tuple[dict[str, int], dict[int, str]]:
-        chars_in_text = set(text)
-
-        # alphabet = set()
-        # for charset in CharTokenizer._charset:
-        #     alphabet.update(charset)
-        # alphabet.update(chars_in_text)
-
-        vocabulary = sorted(chars_in_text)
-        return ({char: i for i, char in enumerate(vocabulary)},
-                {i: char for i, char in enumerate(vocabulary)})
-    
-    def encode(self, text: str) -> list[int]:
-        return [self._stoi[char] for char in text]
-
-    def decode(self, tokens: list[int]) -> str:
-        return "".join([self._itos[id] for id in tokens])
-    
-    def __len__(self) -> int:
-        """Returns the vocabulary size."""
-        return len(self._stoi)
 
 
 class TextDataset(Dataset):
