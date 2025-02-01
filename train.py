@@ -15,6 +15,7 @@ from torch.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 
 from tokenizers.char_tokenizer import CharTokenizer
+from tokenizers.byte_pair_tokenizer import BytePairTokenizer
 from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
 from models.recurrent import RecurrentLM, RecurrentLMGraves, RecurrentEnsembleLM
@@ -48,7 +49,7 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 5
+    epochs = 1#5
     batch_size: int = 64
     lr: float = 1e-3
     clip_grads: float | None = 1
@@ -205,22 +206,30 @@ def build_model(vocab_size: int, config: TrainConfig):
 def main():
     config = TrainConfig()
     text = load_text(config.dataset_path)
-    tokenizer = CharTokenizer(text)
 
+    print("Training tokenizer...")
+    #tokenizer = CharTokenizer()
+    tokenizer = BytePairTokenizer(vocab_size=256+128)
+    tokenizer.train(text)
+    
+    print("Encoding training text...")
     encoded_text = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     train_dataset, val_dataset = create_datasets(encoded_text, config)
     
+    print("Building model...")
     model = build_model(len(tokenizer), config)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
 
+    print("Training model...")
     train(model, train_dataset, val_dataset, config)
-    sample_text(model, tokenizer, max_new_tokens=1000, config=config)
 
+    print("Saving checkpoint...")
     torch.save(model.state_dict(), f"{config.model.name.lower()}_checkpoint_{config.epochs}ep.pt")
-
     # model.load_state_dict(torch.load("transformer_checkpoint_5ep.pt", weights_only=True))
+
+    print("Generating text...")
     sample_text(model, tokenizer, max_new_tokens=1000, config=config)
 
 
