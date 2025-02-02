@@ -72,43 +72,63 @@ def byte_pair_encode(text_bytes: list[int], max_steps: int) -> tuple[list[int], 
 
 
 class BytePairTokenizer(BaseTokenizer):
+    """
+    A tokenizer that uses byte pair encoding to encode byte sequences into a
+    smaller number of tokens.
+
+    NOTE: This is a simple version that does not apply slicing of the text
+    with a regular expression for achieving a more semantically consistent
+    encoding.
+    """
 
     def __init__(self, vocab_size: int):
         super().__init__()
         self._vocab_size = vocab_size
         self._num_merges = vocab_size - 256
         self.encoding_map: dict[tuple[int, int], int] = {}
-        # self.decoding_map: dict[int, tuple[int, int]] = {}
         self.vocab_to_bytes: dict[int, bytes] = {} # for decoding
 
-
     def _text_to_bytes(self, text: str) -> list[int]:
+        """Convert a string into a list of bytes."""
         return list(text.encode("utf-8"))
 
     def train(self, text: str) -> None:
+        """
+        Train the BytePairTokenizer on the given text.
+
+        This method learns the encoding by performing byte pair encoding
+        on the text. It constructs a mapping from encoding tokens to their
+        original byte pairs.
+
+        Args:
+            text: The input text to train the tokenizer on.
+        """
+        # Convert the input text to a list of bytes
         text_bytes = self._text_to_bytes(text)
+
+        # Encode the text bytes using byte pair encoding and store the encoding map
         _, self.encoding_map = byte_pair_encode(text_bytes, max_steps=self._num_merges)
 
-
-        # self.decoding_map = {v: k for k, v in self.encoding_map.items()}
-
-        # map encoding tokens to into their original byte sequence
+        # Create a map from encoding tokens to their original byte representations
         self.vocab_to_bytes = {idx: bytes([idx]) for idx in range(256)}
         for (p0, p1), idx in self.encoding_map.items():
             self.vocab_to_bytes[idx] = self.vocab_to_bytes[p0] + self.vocab_to_bytes[p1]
 
-    def encode(self, text):
+    def encode(self, text: str) -> list[int]:
+        """
+        Encodes a string into a compressed list of token ids.
+
+        Args:
+            text: String to be converted into a sequence of token ids.
+
+        Returns:
+            A list of token ids.
+        """
         text_bytes = self._text_to_bytes(text)
+        # Replace byte pairs with new tokens from the learned encoding
         for byte_pair, new_token in self.encoding_map.items():
             text_bytes = _replace_byte_pair_by_token(text_bytes, byte_pair, new_token)
         return text_bytes
-    
-    # def _decode_token(self, token_id: int) -> list[int]:
-    #     """Recursively decode a single token_id into its original byte sequence."""
-    #     if token_id in self.decoding_map:
-    #         left, right = self.decoding_map[token_id]
-    #         return self._decode_token(left) + self._decode_token(right)
-    #     return [token_id]
 
     def decode(self, token_ids: list[int]) -> str:
 
@@ -118,25 +138,14 @@ class BytePairTokenizer(BaseTokenizer):
         We decode in a lenient fashion by replacing broken byte pairs of
         the prediction with a replacement token.
 
-        TODO: Directly reconstruct a byte stream like in tutorial.
-
         Args:
             token_ids: List of token ids to be decoded.
 
         Returns:
             The decoded string.
         """
-        
-
         tokens = b"".join(self.vocab_to_bytes[idx] for idx in token_ids)
         return tokens.decode("utf-8", errors="replace")
-
-        # decoded_bytes = []
-        # for token_id in token_ids:
-        #     decoded_token = self._decode_token(token_id)
-        #     decoded_bytes.extend(decoded_token)
-
-        # return bytes(decoded_bytes).decode("utf-8", errors="replace")
     
     def __len__(self) -> int:
         """Returns the size of the vocabulary."""
