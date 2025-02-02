@@ -2,6 +2,11 @@ from collections import Counter
 
 from tokenizers.base_tokenizer import BaseTokenizer
 
+# TODO: More effcient tokenization by using regex to separate
+# consistenly and semantically coherent.
+# import regex as re
+# gpt2pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+
 
 def _most_frequent_byte_pair(str_bytes: list[int]) -> tuple[int, int]:
     """
