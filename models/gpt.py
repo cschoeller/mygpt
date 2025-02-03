@@ -2,7 +2,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-
 vocab_size = 65
 n_embd = 384
 n_head = 6

@@ -1,28 +1,27 @@
-from typing import ClassVar
 from dataclasses import dataclass
 from enum import Enum, auto
-from time import time
 import string
+from time import time
+from typing import ClassVar
 
 import torch
 from torch import nn
-import torch.nn.functional as F
-from torch.utils.data.dataset import Dataset
-from torch.utils.data.dataloader import DataLoader
-from torch.optim.adamw import AdamW
-from torch.optim import Optimizer
 from torch.amp import GradScaler
+import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
+from torch.optim import Optimizer
+from torch.optim.adamw import AdamW
+from torch.utils.data.dataloader import DataLoader
+from torch.utils.data.dataset import Dataset
 
-from tokenizers.char_tokenizer import CharTokenizer
-from tokenizers.byte_pair_tokenizer import BytePairTokenizer
 from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
-from models.recurrent import RecurrentLM, RecurrentLMGraves, RecurrentEnsembleLM
+from models.gpt import KarpathyGPT
+from models.recurrent import RecurrentEnsembleLM, RecurrentLM, RecurrentLMGraves
 from models.transformer import Transformer
 from models.transformer_v2 import TransformerV2
-from models.gpt import KarpathyGPT
-
+from tokenizers.byte_pair_tokenizer import BytePairTokenizer
+from tokenizers.char_tokenizer import CharTokenizer
 
 torch.set_float32_matmul_precision('high') # enable tensor cores
 

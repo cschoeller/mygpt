@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 
+
 class BaseTokenizer(ABC):
     """
     Abstract base class for all tokenizers.

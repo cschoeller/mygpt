@@ -1,6 +1,8 @@
-from typing import ClassVar
 import string
+from typing import ClassVar
+
 from tokenizers.base_tokenizer import BaseTokenizer
+
 
 class CharTokenizer(BaseTokenizer):
 
