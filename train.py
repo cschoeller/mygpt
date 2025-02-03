@@ -23,7 +23,7 @@ from models.transformer_v2 import TransformerV2
 from tokenizers.byte_pair_tokenizer import BytePairTokenizer
 from tokenizers.char_tokenizer import CharTokenizer
 
-torch.set_float32_matmul_precision('high') # enable tensor cores
+torch.set_float32_matmul_precision("high")  # enable tensor cores
 
 if torch.backends.cuda.is_flash_attention_available():
     torch.backends.cuda.enable_flash_sdp(enabled=True)
@@ -42,13 +42,12 @@ class ModelType(Enum):
 
 @dataclass
 class TrainConfig:
-
     # data
     dataset_path: str = "data/tinyshakespeare.txt"
     p_train: float = 0.9
 
     # training
-    epochs = 1#5
+    epochs = 5
     batch_size: int = 64
     lr: float = 1e-3
     clip_grads: float | None = 1
@@ -59,7 +58,7 @@ class TrainConfig:
 
     # regularization
     weight_decay: float = 0.01
-    dropout: float = 0.2 # transformer
+    dropout: float = 0.2  # transformer
 
     # model
     context_length: int = 256
@@ -68,16 +67,15 @@ class TrainConfig:
 
 
 class TextDataset(Dataset):
-    
     def __init__(self, text_tensor: torch.Tensor, block_size: int) -> None:
         self._text_tensor = text_tensor
         self._block_size = block_size
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        x = self._text_tensor[idx: idx + self._block_size]
-        y = self._text_tensor[idx+1 : idx + self._block_size + 1]
+        x = self._text_tensor[idx : idx + self._block_size]
+        y = self._text_tensor[idx + 1 : idx + self._block_size + 1]
         return x, y
-    
+
     def __len__(self) -> int:
         return len(self._text_tensor) - self._block_size
 
@@ -100,10 +98,15 @@ def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return F.cross_entropy(logits, targets)
 
 
-def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
-         loss_fn, scaler: GradScaler, optimizer: Optimizer,
-         config: TrainConfig, is_train: bool = True) -> tuple[float, float]:
-
+def step(
+    batch: tuple[torch.Tensor, torch.Tensor],
+    model: nn.Module,
+    loss_fn,
+    scaler: GradScaler,
+    optimizer: Optimizer,
+    config: TrainConfig,
+    is_train: bool = True,
+) -> tuple[float, float]:
     batch_start = time()
     x, targets = batch
     x, targets = x.to(config.device), targets.to(config.device)
@@ -112,8 +115,10 @@ def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
     # and disabling grad in validation
     @torch.compile(disable=not config.compile, mode="reduce-overhead")
     def _compiled_step(is_train: bool) -> torch.Tensor:
-        with (torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision),
-            torch.set_grad_enabled(is_train)):
+        with (
+            torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision),
+            torch.set_grad_enabled(is_train),
+        ):
             logits = model(x)
             loss = loss_fn(logits, targets)
 
@@ -122,14 +127,14 @@ def step(batch: tuple[torch.Tensor, torch.Tensor], model: nn.Module,
             scaler.scale(loss).backward()
 
             if config.clip_grads is not None:
-                scaler.unscale_(optimizer) # needed for regular clipping
+                scaler.unscale_(optimizer)  # needed for regular clipping
                 clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
 
             scaler.step(optimizer)
             scaler.update()
 
         return loss
-    
+
     loss = _compiled_step(is_train)
     return loss.item(), (time() - batch_start)
 
@@ -138,17 +143,17 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     model.train()
     model.to(config.device)
 
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size,
-                              shuffle=config.shuffle, num_workers=8,
-                              pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size,
-                              shuffle=config.shuffle, num_workers=8,
-                              pin_memory=True)
+    train_loader = DataLoader(
+        train_dataset, batch_size=config.batch_size, shuffle=config.shuffle, num_workers=8, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=config.batch_size, shuffle=config.shuffle, num_workers=8, pin_memory=True
+    )
     scaler = torch.amp.GradScaler(device=config.device, enabled=config.mixed_precision)
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
-    for e in range(1, config.epochs+1):
-        running_loss = 0.
+    for e in range(1, config.epochs + 1):
+        running_loss = 0.0
 
         for i, batch in enumerate(train_loader):
             loss, batch_time = step(batch, model, loss_fn, scaler, optimizer, config)
@@ -156,21 +161,23 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
 
             val_result = ""
             if i == len(train_loader) - 1:
-                total_val_loss = 0.
+                total_val_loss = 0.0
                 for batch in val_loader:
                     val_loss, _ = step(batch, model, loss_fn, scaler, optimizer, config, is_train=False)
                     total_val_loss += val_loss
                 val_result = f", val_loss {total_val_loss / len(val_loader):.6f}"
-                
 
-            print(f"epoch {e}, batch {i}/{len(train_loader)-1}, loss {running_loss/(i+1):.6f}" +
-                  val_result + f", s/it {batch_time:.4f}")
+            print(
+                f"epoch {e}, batch {i}/{len(train_loader) - 1}, loss {running_loss / (i + 1):.6f}"
+                + val_result
+                + f", s/it {batch_time:.4f}"
+            )
 
 
 def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int, config: TrainConfig):
     model.to(config.device)
     model.eval()
-    start_tokens = torch.zeros(size=(1,1), dtype=torch.long, device=config.device)
+    start_tokens = torch.zeros(size=(1, 1), dtype=torch.long, device=config.device)
     preds = model.generate(start_tokens, max_new_tokens, config.gen_temperature)
     for pred in preds:
         sample_text = tokenizer.decode(pred[1:].tolist())
@@ -178,7 +185,6 @@ def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_toke
 
 
 def build_model(vocab_size: int, config: TrainConfig):
-
     match config.model:
         case ModelType.BIGRAM:
             return BigramLM(vocab_size)
@@ -191,14 +197,26 @@ def build_model(vocab_size: int, config: TrainConfig):
         case ModelType.RNNENSEMBLE:
             return RecurrentEnsembleLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
         case ModelType.TRANSFORMER:
-            return Transformer(vocab_size, context_length=config.context_length, embed_dim=384,
-                               heads=6, n_layers=6, drop_rate=config.dropout)
+            return Transformer(
+                vocab_size,
+                context_length=config.context_length,
+                embed_dim=384,
+                heads=6,
+                n_layers=6,
+                drop_rate=config.dropout,
+            )
         case ModelType.TRANSFORMERV2:
-            return TransformerV2(vocab_size, context_length=config.context_length, embed_dim=384,
-                               heads=6, n_layers=6, drop_rate=config.dropout)
+            return TransformerV2(
+                vocab_size,
+                context_length=config.context_length,
+                embed_dim=384,
+                heads=6,
+                n_layers=6,
+                drop_rate=config.dropout,
+            )
         case ModelType.KARPATHY:
             return KarpathyGPT()
-        
+
     raise KeyError("Specified model type {config.model} not available.")
 
 
@@ -207,14 +225,14 @@ def main():
     text = load_text(config.dataset_path)
 
     print("Training tokenizer...")
-    #tokenizer = CharTokenizer()
-    tokenizer = BytePairTokenizer(vocab_size=256+128)
+    # tokenizer = CharTokenizer()
+    tokenizer = BytePairTokenizer(vocab_size=512)
     tokenizer.train(text)
-    
+
     print("Encoding training text...")
     encoded_text = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     train_dataset, val_dataset = create_datasets(encoded_text, config)
-    
+
     print("Building model...")
     model = build_model(len(tokenizer), config)
 
