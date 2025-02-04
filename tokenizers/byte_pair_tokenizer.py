@@ -95,13 +95,15 @@ class BytePairTokenizer(BaseTokenizer):
     encoding.
     """
 
-    def __init__(self, vocab_size: int, split_pattern: Literal["all, gpt-2, gpt-4"] = "gpt-4"):
+    def __init__(self, vocab_size: int, split_pattern: Literal["all", "gpt-2", "gpt-4"] = "gpt-4"):
         super().__init__()
         assert vocab_size > 256, "vocab_size must be greater than 256."
         self._vocab_size = vocab_size
         self._num_merges = vocab_size - 256
-        self.encoding_map: dict[tuple[int, int], int] = {}
-        self.vocab_to_bytes: dict[int, bytes] = {}  # for decoding
+        self._encoding_map: dict[tuple[int, int], int] = {}
+        self._vocab_to_bytes: dict[int, bytes] = {}  # for decoding
+        self._special_tokens: dict[str, int] = {}
+        self._special_tokens_to_bytes: dict[int, str] = {}
         self._split_pattern = self._build_regex_pattern(split_pattern)
 
     def _build_regex_pattern(self, regex_pattern: str) -> re.Pattern:
@@ -136,14 +138,69 @@ class BytePairTokenizer(BaseTokenizer):
         text_bytes = [self._text_to_bytes(chunk) for chunk in text_chunks]
 
         # Encode the text bytes using byte pair encoding and store the encoding map
-        _, self.encoding_map = byte_pair_encode(text_bytes, max_steps=self._num_merges)
+        _, self._encoding_map = byte_pair_encode(text_bytes, max_steps=self._num_merges)
 
         # Create a map from encoding tokens to their original byte representations
-        self.vocab_to_bytes = {idx: bytes([idx]) for idx in range(256)}
-        for (p0, p1), idx in self.encoding_map.items():
-            self.vocab_to_bytes[idx] = self.vocab_to_bytes[p0] + self.vocab_to_bytes[p1]
+        self._vocab_to_bytes = {idx: bytes([idx]) for idx in range(256)}
+        for (p0, p1), idx in self._encoding_map.items():
+            self._vocab_to_bytes[idx] = self._vocab_to_bytes[p0] + self._vocab_to_bytes[p1]
 
-    def encode(self, text: str) -> list[int]:
+    def register_special_tokens(self, special_characters: dict[str, int]) -> None:
+        """
+        Register special tokens with their corresponding token ids.
+
+        This method allows the tokenizer to recognize special tokens and their specified ids,
+        enabling them to be treated distinctly during encoding and decoding.
+
+        Args:
+            special_characters: A dictionary where keys are special token strings and values
+                                are their corresponding integer ids, e.g., {"<|endoftext|>": 100257}.
+        """
+        if any(token_id < self._vocab_size for token_id in special_characters.values()):
+            raise ValueError("Special token ids must be greater than or equal to vocab_size.")
+        self._special_tokens = special_characters
+        self._special_tokens_to_bytes = {v: k.encode("utf-8") for k, v in special_characters.items()}
+
+    def _encode_no_special(self, text: str) -> list[int]:
+        text_chunks = self._split_pattern.findall(text)
+        token_ids = []
+        for chunk in text_chunks:
+            chunk_bytes = self._text_to_bytes(chunk)
+            # Replace byte pairs with new tokens from the learned encoding
+            for byte_pair, new_token in self._encoding_map.items():
+                chunk_bytes = _replace_byte_pair(chunk_bytes, byte_pair, new_token)
+            token_ids.extend(chunk_bytes)
+
+        return token_ids
+
+    def _get_special(self, allowed_special: Literal["all", "none", "none_raise"]) -> dict[str, int]:
+        """
+        Retrieves a dictionary of special tokens and their ids based on provided settings.
+
+        Args:
+            allowed_special: String indicating which special tokens to include.
+                "all" includes all special tokens, "none" includes none of them,
+                and "none_raise" includes none of them but raises an error if
+                any special tokens are found in the input text.
+
+        Returns:
+            A dictionary of special tokens and their ids, or None if no special
+            tokens are allowed.
+        """
+        special = {}
+
+        if allowed_special == "all":
+            special = self._special_tokens
+        elif allowed_special == "none":
+            pass
+        elif allowed_special == "none_raise":
+            assert all(token not in text for token in self._special_tokens)
+        else:
+            raise ValueError(f"Invalid value for allowed_special: {allowed_special}.")
+
+        return special
+
+    def encode(self, text: str, allowed_special: Literal["all", "none", "none_raise"] = "none_raise") -> list[int]:
         """
         Encodes a string into a compressed list of token ids.
 
@@ -154,32 +211,42 @@ class BytePairTokenizer(BaseTokenizer):
             A list of token ids.
         """
 
-        text_chunks = self._split_pattern.findall(text)
-        token_ids = []
-        for chunk in text_chunks:
-            chunk_bytes = self._text_to_bytes(chunk)
-            # Replace byte pairs with new tokens from the learned encoding
-            for byte_pair, new_token in self.encoding_map.items():
-                chunk_bytes = _replace_byte_pair(chunk_bytes, byte_pair, new_token)
-            token_ids.extend(chunk_bytes)
+        # get special tokens, if empty encode normally
+        if not (special := self._get_special(allowed_special)):
+            return self._encode_no_special(text)
 
+        # split text by special tokens and encode chunks separately
+        special_pattern = "(" + "|".join(re.escape(k) for k in special) + ")"
+        special_chunks = re.split(special_pattern, text)
+        token_ids = []
+        for part in special_chunks:
+            if part in special:  # special token
+                token_ids.append(special[part])
+            else:  # ordinary sequence
+                token_ids.extend(self._encode_no_special(part))
         return token_ids
 
     def decode(self, token_ids: list[int]) -> str:
         """
-        Decodes a list of token ids back into the original string.
-
-        We decode in a lenient fashion by replacing broken byte pairs of
-        the prediction with a replacement token.
+        Decodes a sequence of token ids back into the original string.
 
         Args:
-            token_ids: List of token ids to be decoded.
+            token_ids: List of token ids to be converted back into a string.
 
         Returns:
-            The decoded string.
+            The original string.
         """
-        tokens = b"".join(self.vocab_to_bytes[idx] for idx in token_ids)
-        return tokens.decode("utf-8", errors="replace")
+        decoded_bytes = []
+        for token_id in token_ids:
+            if token_id in self._vocab_to_bytes:
+                decoded_bytes.append(self._vocab_to_bytes[token_id])
+            elif token_id in self._special_tokens_to_bytes:
+                decoded_bytes.append(self._special_tokens_to_bytes[token_id])
+            else:
+                raise ValueError(f"Invalid token id: {token_id}")
+
+        decoded_bytes = b"".join(decoded_bytes)
+        return decoded_bytes.decode("utf-8", errors="replace")
 
     def __len__(self) -> int:
         """Returns the size of the vocabulary."""
@@ -196,10 +263,17 @@ class BytePairTokenizer(BaseTokenizer):
 
 # vocab_size = 512
 # tokenizer = BytePairTokenizer(vocab_size=vocab_size, split_pattern="gpt-4")
+# tokenizer.register_special_tokens(
+#     {
+#         "<|middlespecial|>": 100257,
+#     }
+# )
 # tokenizer.train(text)
 
-# encoded_text = tokenizer.encode(text)
+# text_in = "This is a text snippet <|middlespecial|> with some special characters."
+# encoded_text = tokenizer.encode(text_in, allowed_special="all")
 # decoded_text = tokenizer.decode(encoded_text)
+# print(decoded_text)
 
 # text_bytes = list(text.encode("utf-8"))
 # print("Original text size: ", len(text_bytes))
