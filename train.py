@@ -1,8 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-import string
+import os
+import pickle
 from time import time
-from typing import ClassVar
 
 import torch
 from torch import nn
@@ -18,8 +18,8 @@ from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
 from models.gpt import KarpathyGPT
 from models.recurrent import RecurrentEnsembleLM, RecurrentLM, RecurrentLMGraves
-from models.transformer import Transformer
-from models.transformer_v2 import TransformerV2
+from models.transformer import Transformer, TransformerParams
+from models.transformer_vanilla import TransformerVanilla
 from tokenizers.byte_pair_tokenizer import BytePairTokenizer
 from tokenizers.char_tokenizer import CharTokenizer
 
@@ -35,19 +35,19 @@ class ModelType(Enum):
     RNN = auto()
     RNNGRAVES = auto()
     RNNENSEMBLE = auto()
+    TRANSFORMERVANILLA = auto()
     TRANSFORMER = auto()
-    TRANSFORMERV2 = auto()
     KARPATHY = auto()
 
 
 @dataclass
 class TrainConfig:
     # data
-    dataset_path: str = "data/tinyshakespeare.txt"
+    dataset_path: str = "data/tinyshakespeare.txt"  # "data/BNCSplitWordsCorpus.txt"
     p_train: float = 0.9
 
     # training
-    epochs = 5
+    epochs = 1
     batch_size: int = 64
     lr: float = 1e-3
     clip_grads: float | None = 1
@@ -61,9 +61,20 @@ class TrainConfig:
     dropout: float = 0.2  # transformer
 
     # model
-    context_length: int = 256
-    model: ModelType = ModelType.TRANSFORMERV2
+    model: ModelType = ModelType.TRANSFORMER
     gen_temperature: float = 1.0
+    transformer_params: TransformerParams = field(
+        default_factory=lambda: TransformerParams(
+            vocab_size=512,
+            context_length=256,
+            embed_dim=384,
+            heads=6,
+            n_layers=6,
+            drop_rate=0.2,
+            ffn_activation="relu",
+            normalization="layernorm",
+        )
+    )
 
 
 class TextDataset(Dataset):
@@ -88,7 +99,8 @@ def load_text(path_to_textfile: str) -> str:
 def create_datasets(encoded_text: torch.Tensor, config: TrainConfig) -> tuple[TextDataset, TextDataset]:
     n = int(config.p_train * len(encoded_text))
     train, val = encoded_text[:n], encoded_text[n:]
-    return TextDataset(train, config.context_length), TextDataset(val, config.context_length)
+    context_length = config.transformer_params.context_length
+    return TextDataset(train, context_length), TextDataset(val, context_length)
 
 
 def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -184,36 +196,30 @@ def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_toke
         print(sample_text + "\n")
 
 
-def build_model(vocab_size: int, config: TrainConfig):
+def build_model(config: TrainConfig):
+    transformer_params = config.transformer_params
     match config.model:
         case ModelType.BIGRAM:
-            return BigramLM(vocab_size)
+            return BigramLM(transformer_params.vocab_size)
         case ModelType.RNN:
             # Turns out multiple stacked layers of this model perform poorly, probably a lot
             # of the input information gets lost passing from layer to layer.
-            return RecurrentLM(vocab_size, hidden_dim=256, num_layers=5)
+            return RecurrentLM(transformer_params.vocab_size, hidden_dim=256, num_layers=5)
         case ModelType.RNNGRAVES:
-            return RecurrentLMGraves(vocab_size, hidden_dim=256, num_layers=5)
+            return RecurrentLMGraves(transformer_params.vocab_size, hidden_dim=256, num_layers=5)
         case ModelType.RNNENSEMBLE:
-            return RecurrentEnsembleLM(vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
+            return RecurrentEnsembleLM(transformer_params.vocab_size, embed_dim=32, hidden_dim=256, num_layers=5)
+        case ModelType.TRANSFORMERVANILLA:
+            return TransformerVanilla(
+                transformer_params.vocab_size,
+                context_length=transformer_params.context_length,
+                embed_dim=transformer_params.embed_dim,
+                heads=transformer_params.heads,
+                n_layers=transformer_params.n_layers,
+                drop_rate=transformer_params.drop_rate,
+            )
         case ModelType.TRANSFORMER:
-            return Transformer(
-                vocab_size,
-                context_length=config.context_length,
-                embed_dim=384,
-                heads=6,
-                n_layers=6,
-                drop_rate=config.dropout,
-            )
-        case ModelType.TRANSFORMERV2:
-            return TransformerV2(
-                vocab_size,
-                context_length=config.context_length,
-                embed_dim=384,
-                heads=6,
-                n_layers=6,
-                drop_rate=config.dropout,
-            )
+            return Transformer(transformer_params)
         case ModelType.KARPATHY:
             return KarpathyGPT()
 
@@ -224,17 +230,22 @@ def main():
     config = TrainConfig()
     text = load_text(config.dataset_path)
 
-    print("Training tokenizer...")
     # tokenizer = CharTokenizer()
-    tokenizer = BytePairTokenizer(vocab_size=512)
-    tokenizer.train(text)
+    if os.path.exists("bpe_tokenizer.pkl"):
+        print("Loading from tokenizer from disk...")
+        tokenizer = pickle.load(open("bpe_tokenizer.pkl", "rb"))
+    else:
+        print("Training tokenizer...")
+        tokenizer = BytePairTokenizer(vocab_size=config.transformer_params.vocab_size)
+        tokenizer.train(text)
+        pickle.dump(tokenizer, open("bpe_tokenizer.pkl", "wb"))
 
     print("Encoding training text...")
     encoded_text = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     train_dataset, val_dataset = create_datasets(encoded_text, config)
 
     print("Building model...")
-    model = build_model(len(tokenizer), config)
+    model = build_model(config)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")

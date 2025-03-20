@@ -21,5 +21,6 @@ class DynamicTanh(nn.Module):
 
     def forward(self, x):
         """Applies the element-wise normalization."""
+        print(self._alpha[:3])
         x = torch.tanh(self._alpha * x)
         return self._gamma * x + self._beta

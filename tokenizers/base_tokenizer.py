@@ -50,5 +50,3 @@ class BaseTokenizer(ABC):
         Returns the vocabulary size.
         """
         ...
-
-

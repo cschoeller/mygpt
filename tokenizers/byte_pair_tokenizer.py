@@ -105,6 +105,7 @@ class BytePairTokenizer(BaseTokenizer):
         self._special_tokens: dict[str, int] = {}
         self._special_tokens_to_bytes: dict[int, str] = {}
         self._split_pattern = self._build_regex_pattern(split_pattern)
+        self._trained = False
 
     def _build_regex_pattern(self, regex_pattern: str) -> re.Pattern:
         if regex_pattern == "all":
@@ -145,6 +146,8 @@ class BytePairTokenizer(BaseTokenizer):
         for (p0, p1), idx in self._encoding_map.items():
             self._vocab_to_bytes[idx] = self._vocab_to_bytes[p0] + self._vocab_to_bytes[p1]
 
+        self._trained = True
+
     def register_special_tokens(self, special_characters: dict[str, int]) -> None:
         """
         Register special tokens with their corresponding token ids.
@@ -173,11 +176,12 @@ class BytePairTokenizer(BaseTokenizer):
 
         return token_ids
 
-    def _get_special(self, allowed_special: Literal["all", "none", "none_raise"]) -> dict[str, int]:
+    def _get_special(self, text: str, allowed_special: Literal["all", "none", "none_raise"]) -> dict[str, int]:
         """
         Retrieves a dictionary of special tokens and their ids based on provided settings.
 
         Args:
+            text: String to check for special tokens.
             allowed_special: String indicating which special tokens to include.
                 "all" includes all special tokens, "none" includes none of them,
                 and "none_raise" includes none of them but raises an error if
@@ -210,9 +214,10 @@ class BytePairTokenizer(BaseTokenizer):
         Returns:
             A list of token ids.
         """
+        assert self._trained, "Tokenizer must be trained before encoding."
 
         # get special tokens, if empty encode normally
-        if not (special := self._get_special(allowed_special)):
+        if not (special := self._get_special(text, allowed_special)):
             return self._encode_no_special(text)
 
         # split text by special tokens and encode chunks separately
@@ -236,6 +241,8 @@ class BytePairTokenizer(BaseTokenizer):
         Returns:
             The original string.
         """
+        assert self._trained, "Tokenizer must be trained before decoding."
+
         decoded_bytes = []
         for token_id in token_ids:
             if token_id in self._vocab_to_bytes:

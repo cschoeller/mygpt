@@ -7,11 +7,11 @@ class SinusoidalPositionalEncoding(nn.Module):
 
     def __init__(self, context_length: int, embed_dim: int):
         super().__init__()
-        assert embed_dim%2 == 0, "embed_dim must be even"
+        assert embed_dim % 2 == 0, "embed_dim must be even"
 
         pos = torch.arange(context_length, dtype=torch.float32)
         even_dims = torch.arange(0, embed_dim, 2, dtype=torch.float32)
-        scale_factors = 10000.**(-even_dims/embed_dim)
+        scale_factors = 10000.0 ** (-even_dims / embed_dim)
         scaled_pos = pos.unsqueeze(1) * scale_factors
 
         # compute the positional encodings
