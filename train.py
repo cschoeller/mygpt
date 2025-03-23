@@ -71,8 +71,9 @@ class TrainConfig:
             heads=6,
             n_layers=6,
             drop_rate=0.2,
-            ffn_activation="relu",
-            normalization="layernorm",
+            ffn_activation="relu",  # {"relu", "gelu", "relu2"}
+            normalization="layernorm",  # {"layernorm", "dynamic_tanh"}
+            positional_encoding="learned",  # {"learned", "sinusoidal", "nope"}
         )
     )
 

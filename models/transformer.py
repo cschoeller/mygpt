@@ -5,9 +5,8 @@ from torch import nn
 
 from models.base_language_model import BaseLanguageModel
 from models.dynamic_tanh import DynamicTanh
+from models.positional_encoding import LearnedPositionalEncoding, NoPos, SinusoidalPositionalEncoding
 from models.relu2 import ReLU2
-
-# torch.set_printoptions(profile="full", sci_mode=False, precision=2)
 
 
 def _get_activation(activation: str):
@@ -30,6 +29,17 @@ def _get_normalization(normalization: str, embed_dim: int):
         raise ValueError(f"Unknown normalization: {normalization}")
 
 
+def _get_positional_encoding(positional_encoding: str, context_length: int, embed_dim: int):
+    if positional_encoding == "sinusoidal":
+        return SinusoidalPositionalEncoding(context_length, embed_dim)
+    elif positional_encoding == "learned":
+        return LearnedPositionalEncoding(context_length, embed_dim)
+    elif positional_encoding == "nopos":
+        return NoPos()
+    else:
+        raise ValueError(f"Unknown positional encoding: {positional_encoding}")
+
+
 @dataclass
 class TransformerParams:
     vocab_size: int
@@ -40,6 +50,7 @@ class TransformerParams:
     drop_rate: float = 0.2
     ffn_activation: str = "relu"
     normalization: str = "layernorm"
+    positional_encoding: str = "learned"
 
 
 class CausalSelfAttention(nn.Module):
@@ -98,7 +109,9 @@ class Transformer(BaseLanguageModel):
         super().__init__()
         self._context_length = params.context_length
         self._token_embedding_table = nn.Embedding(params.vocab_size, params.embed_dim)
-        self._positional_embed = nn.Embedding(params.context_length, params.embed_dim)
+        self._positional_encoder = _get_positional_encoding(
+            params.positional_encoding, params.context_length, params.embed_dim
+        )
         self._sa_head = nn.Sequential(*(TransformerLayer(params) for _ in range(params.n_layers)))
         self._norm = _get_normalization(params.normalization, params.embed_dim)
         self._lm_head = nn.Linear(params.embed_dim, params.vocab_size, bias=False)
@@ -124,10 +137,9 @@ class Transformer(BaseLanguageModel):
             the sequence and V is the vocabulary size.
         """
         *_, T = token_indices.shape
-        token_embed = self._token_embedding_table(token_indices)  # (B, T, C)
+        tokens = self._token_embedding_table(token_indices)  # (B, T, embed_dim)
         token_pos_indices = torch.arange(T, device=token_indices.device)
-        pos_embed = self._positional_embed(token_pos_indices)  # (T, C)
-        tokens = token_embed + pos_embed  # (B, T, embed_dim)
+        tokens = self._positional_encoder(tokens, token_pos_indices)  # (B, T, embed_dim)
         tokens = self._sa_head(tokens)  # (B, T, embed_dim)
         tokens = self._norm(tokens)  # (B, T, embed_dim)
         return self._lm_head(tokens)  # (B, T, vocab_size)

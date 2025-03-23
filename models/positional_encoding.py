@@ -21,5 +21,33 @@ class SinusoidalPositionalEncoding(nn.Module):
 
         self._pos_enc = nn.Buffer(pos_enc, persistent=False)
 
-    def forward(self, pos_indices: torch.Tensor) -> torch.Tensor:
-        return self._pos_enc[pos_indices]
+    def forward(self, tokens: torch.Tensor, pos_indices: torch.Tensor) -> torch.Tensor:
+        return tokens + self._pos_enc[pos_indices]
+
+
+class LearnedPositionalEncoding(nn.Module):
+    """Positional encoding with learned positional embeddings."""
+
+    def __init__(self, context_length: int, embed_dim: int):
+        super().__init__()
+        self._pos_enc = nn.Embedding(context_length, embed_dim)
+
+    def forward(self, tokens: torch.Tensor, pos_indices: torch.Tensor) -> torch.Tensor:
+        return tokens + self._pos_enc(pos_indices)
+
+
+class NoPos(nn.Module):
+    """No positional encoding.
+
+    Based on the observations in paper 'Transformer Language Models without Positional
+    Encodings Still Learn Positional Information', Haviv et al., 2022.
+    LinK: https://arxiv.org/abs/2203.16634
+
+    Using it the model still reaches a good loss, but the output text seems less coherent.
+    This could be because I didn't train long enough in my tests or the model is too small
+    thus and not able to learn positional information.
+    """
+
+    def forward(self, tokens: torch.Tensor, pos_indices: torch.Tensor) -> torch.Tensor:
+        """Return the input tokens unchanged, ignoring positional indices."""
+        return tokens
