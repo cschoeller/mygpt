@@ -34,6 +34,8 @@ def _get_positional_encoding(positional_encoding: str, context_length: int, embe
         return SinusoidalPositionalEncoding(context_length, embed_dim)
     elif positional_encoding == "learned":
         return LearnedPositionalEncoding(context_length, embed_dim)
+    elif positional_encoding == "rotary":  # applied in each attention layer
+        return None
     elif positional_encoding == "nopos":
         return NoPos()
     else:
@@ -54,19 +56,28 @@ class TransformerParams:
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, embed_dim: int, heads: int, drop_rate: float):
+    def __init__(self, embed_dim: int, heads: int, drop_rate: float, rotary_pos_encoding: bool = False):
         super().__init__()
         attn_mask = torch.triu(torch.ones(256, 256, dtype=torch.float32) * float("-inf"), diagonal=1)
         self._attn_mask = nn.Buffer(attn_mask, persistent=True)
+        self._rotary_pos_encoding = rotary_pos_encoding
         self._attn = nn.MultiheadAttention(
             embed_dim=embed_dim, num_heads=heads, dropout=drop_rate, add_bias_kv=False, batch_first=True
         )
         self._dropout = nn.Dropout(drop_rate)
 
     def forward(self, tokens: torch.Tensor):
-        # tokens (B, T, C)
-        q, k, v = tokens, tokens, tokens
+        """Computes the output of the causal self-attention.
+
+        Args:
+            tokens: Input tokens, shape (B, T, C).
+        """
+        if self._rotary_pos_encoding:
+            # TODO
+            raise NotImplementedError("Rotary positional encoding not implemented yet.")
+
         # uses flash attention is available and enabled
+        q, k, v = tokens, tokens, tokens
         out, _ = self._attn(q, k, v, attn_mask=self._attn_mask, is_causal=True, need_weights=False)
         return self._dropout(out)
 
@@ -90,7 +101,12 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self._norm1 = _get_normalization(params.normalization, params.embed_dim)
         self._norm2 = _get_normalization(params.normalization, params.embed_dim)
-        self._sa = CausalSelfAttention(embed_dim=params.embed_dim, heads=params.heads, drop_rate=params.drop_rate)
+        self._sa = CausalSelfAttention(
+            embed_dim=params.embed_dim,
+            heads=params.heads,
+            drop_rate=params.drop_rate,
+            rotary_pos_encoding=params.positional_encoding == "rotary",
+        )
         self._ffnet = FeedForward(
             embed_dim=params.embed_dim, drop_rate=params.drop_rate, activation=params.ffn_activation
         )
@@ -138,8 +154,9 @@ class Transformer(BaseLanguageModel):
         """
         *_, T = token_indices.shape
         tokens = self._token_embedding_table(token_indices)  # (B, T, embed_dim)
-        token_pos_indices = torch.arange(T, device=token_indices.device)
-        tokens = self._positional_encoder(tokens, token_pos_indices)  # (B, T, embed_dim)
+        if self._positional_encoder is not None:
+            token_pos_indices = torch.arange(T, device=token_indices.device)
+            tokens = self._positional_encoder(tokens, token_pos_indices)  # (B, T, embed_dim)
         tokens = self._sa_head(tokens)  # (B, T, embed_dim)
         tokens = self._norm(tokens)  # (B, T, embed_dim)
         return self._lm_head(tokens)  # (B, T, vocab_size)

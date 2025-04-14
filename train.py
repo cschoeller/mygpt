@@ -58,7 +58,6 @@ class TrainConfig:
 
     # regularization
     weight_decay: float = 0.01
-    dropout: float = 0.2  # transformer
 
     # model
     model: ModelType = ModelType.TRANSFORMER
