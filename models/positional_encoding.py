@@ -51,3 +51,59 @@ class NoPos(nn.Module):
     def forward(self, tokens: torch.Tensor, pos_indices: torch.Tensor) -> torch.Tensor:
         """Return the input tokens unchanged, ignoring positional indices."""
         return tokens
+
+
+class RotaryPosEmbedding(nn.Module):
+    """Rotary positional embedding.
+
+    "RoFormer: Enhanced Transformer with Rotary Position Embedding", Su et al., 2024.
+
+    NOTE:
+        1. There is a more efficient way to compute this, by chunking the token dimensions into
+        half and rotating [x_i, x_(N//2 +i)] instead of [x_i, x_(i+1)]. It can be considered mathematically
+        equivalent, just differently permuted, but is more efficient.
+        See: https://github.com/KellerJordan/modded-nanogpt/blob/64d8eb51ee951e09d9dba09269e0ddc6a099b9a9/train_gpt.py#L233
+        2. For very long context lengths the pre-computing and caching becomes expensive. In this case we could compute the
+        outer product for those positions we need on the fly and only cache the angles.
+    """
+
+    def __init__(self, embed_dim: int, max_seq_len: int, theta_base: float = 1e4):
+        """Initialize the positional encoding."""
+        super().__init__()
+        self._embed_dim = embed_dim
+        self._max_seq_len = max_seq_len
+
+        # pre-compute the rotations
+        pos = torch.arange(max_seq_len, dtype=torch.float32)
+        theta = theta_base ** (-2.0 * (torch.arange(embed_dim // 2, dtype=torch.float32)) / embed_dim)
+        angle_matrix = torch.outer(pos, theta)  # multiply every position with every angle
+        self._cos_cache = nn.Buffer(angle_matrix.cos().repeat_interleave(2, dim=-1), persistent=False)
+        self._sin_cache = nn.Buffer(angle_matrix.sin().repeat_interleave(2, dim=-1), persistent=False)
+        self._sin_cache[:, 0::2] *= -1  # negate the even indices
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Rotate the input tokens by their positional index.
+
+        The input tokens should have shape (B, T, H, embed_dim), where B is the batch size,
+        T is the sequence length, H is the number of heads, and embed_dim is the embedding
+        dimension.
+
+        Args:
+            tokens: Input tokens to encode.
+
+        """
+        if len(tokens.shape) != 4:
+            raise ValueError("The input tokens must have shape (B, T, H, embed_dim)")
+
+        if tokens.shape[-1] != self._embed_dim:
+            raise ValueError("The last dimension of tokens must be equal to embed_dim")
+
+        _, seq_len, *_ = tokens.shape
+        if seq_len > self._max_seq_len:
+            raise ValueError("The maximum sequence length is exceeded.")
+
+        pos_indices = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
+        tokens_permuted_pairs = tokens.view(*tokens.shape[:-1], tokens.shape[-1] // 2, 2)[..., [1, 0]].flatten(-2)
+
+        return tokens * self._cos_cache[pos_indices, None] + tokens_permuted_pairs * self._sin_cache[pos_indices, None]
