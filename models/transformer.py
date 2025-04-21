@@ -2,11 +2,30 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from torch.nn.functional import scaled_dot_product_attention
 
 from models.base_language_model import BaseLanguageModel
 from models.dynamic_tanh import DynamicTanh
-from models.positional_encoding import LearnedPositionalEncoding, NoPos, SinusoidalPositionalEncoding
+from models.positional_encoding import (
+    LearnedPositionalEncoding,
+    NoPos,
+    RotaryPosEmbedding,
+    SinusoidalPositionalEncoding,
+)
 from models.relu2 import ReLU2
+
+
+@dataclass
+class TransformerParams:
+    vocab_size: int
+    context_length: int = 256
+    embed_dim: int = 384
+    heads: int = 6
+    n_layers: int = 6
+    drop_rate: float = 0.2
+    ffn_activation: str = "relu"
+    normalization: str = "layernorm"
+    positional_encoding: str = "learned"
 
 
 def _get_activation(activation: str):
@@ -42,27 +61,29 @@ def _get_positional_encoding(positional_encoding: str, context_length: int, embe
         raise ValueError(f"Unknown positional encoding: {positional_encoding}")
 
 
-@dataclass
-class TransformerParams:
-    vocab_size: int
-    context_length: int = 256
-    embed_dim: int = 384
-    heads: int = 6
-    n_layers: int = 6
-    drop_rate: float = 0.2
-    ffn_activation: str = "relu"
-    normalization: str = "layernorm"
-    positional_encoding: str = "learned"
+def _get_attention_layer(params: TransformerParams):
+    if params.positional_encoding == "rotary":
+        return RotaryCausalSelfAttention(
+            embed_dim=params.embed_dim,
+            num_heads=params.heads,
+            drop_rate=params.drop_rate,
+            max_seq_len=params.context_length,
+        )
+
+    return CausalSelfAttention(
+        embed_dim=params.embed_dim,
+        num_heads=params.heads,
+        drop_rate=params.drop_rate,
+    )
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, embed_dim: int, heads: int, drop_rate: float, rotary_pos_encoding: bool = False):
+    def __init__(self, *, embed_dim: int, num_heads: int, drop_rate: float):
         super().__init__()
         attn_mask = torch.triu(torch.ones(256, 256, dtype=torch.float32) * float("-inf"), diagonal=1)
         self._attn_mask = nn.Buffer(attn_mask, persistent=True)
-        self._rotary_pos_encoding = rotary_pos_encoding
         self._attn = nn.MultiheadAttention(
-            embed_dim=embed_dim, num_heads=heads, dropout=drop_rate, add_bias_kv=False, batch_first=True
+            embed_dim=embed_dim, num_heads=num_heads, dropout=drop_rate, add_bias_kv=False, batch_first=True
         )
         self._dropout = nn.Dropout(drop_rate)
 
@@ -72,13 +93,40 @@ class CausalSelfAttention(nn.Module):
         Args:
             tokens: Input tokens, shape (B, T, C).
         """
-        if self._rotary_pos_encoding:
-            # TODO
-            raise NotImplementedError("Rotary positional encoding not implemented yet.")
-
         # uses flash attention is available and enabled
         q, k, v = tokens, tokens, tokens
         out, _ = self._attn(q, k, v, attn_mask=self._attn_mask, is_causal=True, need_weights=False)
+        return self._dropout(out)
+
+
+class RotaryCausalSelfAttention(nn.Module):
+    def __init__(self, *, embed_dim: int, num_heads: int, drop_rate: float, max_seq_len: int = 256):
+        super().__init__()
+        # self._embed_dim = embed_dim
+        self._num_heads = num_heads
+        self._head_dim = embed_dim // num_heads
+        self._max_seq_len = max_seq_len
+        self._qkv_embed = nn.Linear(embed_dim, 3 * num_heads * self._head_dim, bias=False)
+        self._rotary_embedding = RotaryPosEmbedding(self._head_dim, max_seq_len=max_seq_len)
+        self._drop_rate = drop_rate
+        self._head_to_embed = nn.Linear(num_heads * self._head_dim, embed_dim, bias=False)
+        self._dropout = nn.Dropout(drop_rate)
+
+    def forward(self, tokens: torch.Tensor):
+        """Computes the output of the rotary causal self-attention.
+
+        Args:
+            tokens: Input tokens, shape (B, T, C).
+        """
+        # to (B, T, 3 * num_heads, head_dim)
+        out_heads = self._qkv_embed(tokens).view(*tokens.shape[:-1], 3 * self._num_heads, self._head_dim)
+        q, k, v = out_heads.chunk(3, dim=-2)  # to (B, T, num_heads, head_dim)
+        q, k = self._rotary_embedding(q), self._rotary_embedding(k)
+        out_heads = scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), dropout_p=self._drop_rate, is_causal=True
+        ).transpose(1, 2)
+        out_heads = out_heads.flatten(start_dim=2)  # flatten heads
+        out = self._head_to_embed(out_heads)
         return self._dropout(out)
 
 
@@ -101,12 +149,7 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self._norm1 = _get_normalization(params.normalization, params.embed_dim)
         self._norm2 = _get_normalization(params.normalization, params.embed_dim)
-        self._sa = CausalSelfAttention(
-            embed_dim=params.embed_dim,
-            heads=params.heads,
-            drop_rate=params.drop_rate,
-            rotary_pos_encoding=params.positional_encoding == "rotary",
-        )
+        self._sa = _get_attention_layer(params)
         self._ffnet = FeedForward(
             embed_dim=params.embed_dim, drop_rate=params.drop_rate, activation=params.ffn_activation
         )
@@ -128,6 +171,7 @@ class Transformer(BaseLanguageModel):
         self._positional_encoder = _get_positional_encoding(
             params.positional_encoding, params.context_length, params.embed_dim
         )
+        assert self._positional_encoder == None if params.positional_encoding == "rotary" else True
         self._sa_head = nn.Sequential(*(TransformerLayer(params) for _ in range(params.n_layers)))
         self._norm = _get_normalization(params.normalization, params.embed_dim)
         self._lm_head = nn.Linear(params.embed_dim, params.vocab_size, bias=False)

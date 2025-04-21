@@ -61,8 +61,13 @@ class RotaryPosEmbedding(nn.Module):
     NOTE:
         1. There is a more efficient way to compute this, by chunking the token dimensions into
         half and rotating [x_i, x_(N//2 +i)] instead of [x_i, x_(i+1)]. It can be considered mathematically
-        equivalent, just differently permuted, but is more efficient.
+        equivalent, just differently permuted.
         See: https://github.com/KellerJordan/modded-nanogpt/blob/64d8eb51ee951e09d9dba09269e0ddc6a099b9a9/train_gpt.py#L233
+        Pseudo code:
+            x1, x2 = tokens.chunk(2, dim=-1)
+            y1 = x1 * cos + x2 * sin
+            y2 = x1 * (-sin) + x2 * cos
+            return torch.cat((y1, y2), dim=-1)
         2. For very long context lengths the pre-computing and caching becomes expensive. In this case we could compute the
         outer product for those positions we need on the fly and only cache the angles.
     """

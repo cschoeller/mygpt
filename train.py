@@ -43,7 +43,9 @@ class ModelType(Enum):
 @dataclass
 class TrainConfig:
     # data
-    dataset_path: str = "data/tinyshakespeare.txt"  # "data/BNCSplitWordsCorpus.txt"
+    dataset_path: str = (
+        "data/tinyshakespeare.txt"  # "data/tinyshakespeare.txt" "data/BNCSplitWordsCorpus.txt" "data/taylorswift.txt"
+    )
     p_train: float = 0.9
 
     # training
@@ -72,7 +74,7 @@ class TrainConfig:
             drop_rate=0.2,
             ffn_activation="relu",  # {"relu", "gelu", "relu2"}
             normalization="layernorm",  # {"layernorm", "dynamic_tanh"}
-            positional_encoding="learned",  # {"learned", "sinusoidal", "nope"}
+            positional_encoding="rotary",  # {"learned", "sinusoidal", "nope", "rotary"}
         )
     )
 
