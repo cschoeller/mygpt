@@ -72,7 +72,7 @@ class RotaryPosEmbedding(nn.Module):
         outer product for those positions we need on the fly and only cache the angles.
     """
 
-    def __init__(self, embed_dim: int, max_seq_len: int, theta_base: float = 1e4, p: float = 0.75):
+    def __init__(self, embed_dim: int, max_seq_len: int, theta_base: float = 1e4, p: float = 1.0):
         """Initialize the positional encoding.
 
         Args:
