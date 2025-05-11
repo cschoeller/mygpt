@@ -95,7 +95,7 @@ class RotaryPosEmbedding(nn.Module):
         # pre-compute the rotations
         self._pos_indices = nn.Buffer(torch.arange(max_seq_len, dtype=torch.long), persistent=False)
         theta = theta_base ** (-2.0 * (torch.arange(embed_dim // 2, dtype=torch.float32)) / embed_dim)
-        angle_matrix = torch.outer(self._pos_indices.float(), theta)  # multiply every position with every angle
+        angle_matrix = torch.outer(self._pos_indices, theta)  # multiply every position with every angle
         self._cos_cache = nn.Buffer(angle_matrix.cos().repeat_interleave(2, dim=-1), persistent=False)
         self._sin_cache = nn.Buffer(angle_matrix.sin().repeat_interleave(2, dim=-1), persistent=False)
         self._sin_cache[:, 0::2] *= -1  # negate the even indices
@@ -124,12 +124,12 @@ class RotaryPosEmbedding(nn.Module):
 
         tokens_rot = tokens[..., : self._max_idx]
 
-        pos_indices = self._pos_indices[:seq_len]  # torch.arange(seq_len, dtype=torch.long, device=tokens.device)
+        pos_indices = self._pos_indices[:seq_len]
         tokens_rot_perm = tokens_rot.view(*tokens_rot.shape[:-1], tokens_rot.shape[-1] // 2, 2)[..., [1, 0]].flatten(-2)
 
         tokens_rot = (
-            tokens_rot * self._cos_cache[pos_indices, None, : self._max_idx]
-            + tokens_rot_perm * self._sin_cache[pos_indices, None, : self._max_idx]
+            tokens_rot * self._cos_cache[pos_indices, None, : self._max_idx].to(tokens.dtype)  # buffer mixed precision
+            + tokens_rot_perm * self._sin_cache[pos_indices, None, : self._max_idx].to(tokens.dtype)
         )
 
         return torch.cat(
