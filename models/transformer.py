@@ -206,17 +206,17 @@ class Transformer(BaseLanguageModel):
             tokens = self._positional_encoder(tokens, token_pos_indices)  # (B, T, embed_dim)
 
         # compute pass through layers, optionally with skip connections
-        intermediate_outputs = []
+        intermediate = []
         first_skip_layer_idx = self._num_layers // 2 + 1
         for i, layer in enumerate(self._layers):
             tokens = layer(tokens)
 
-            intermediate_outputs.append(tokens)
             if self._skip_layers and i >= first_skip_layer_idx:
-                tokens = tokens + intermediate_outputs[self._num_layers - 1 - i]
+                tokens = tokens + intermediate[self._num_layers - 1 - i]
 
-        tokens = self._norm(tokens)  # (B, T, embed_dim)
-        return self._lm_head(tokens)  # (B, T, vocab_size)
+            intermediate.append(tokens)
+
+        return self._lm_head(self._norm(tokens))  # (B, T, vocab_size)
 
     @torch.no_grad()
     def generate(self, token_indices: torch.Tensor, max_new_tokens: int, temp: float = 1.0) -> torch.Tensor:
