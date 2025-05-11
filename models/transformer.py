@@ -211,10 +211,11 @@ class Transformer(BaseLanguageModel):
         for i, layer in enumerate(self._layers):
             tokens = layer(tokens)
 
-            if self._skip_layers and i >= first_skip_layer_idx:
-                tokens = tokens + intermediate[self._num_layers - 1 - i]
+            if self._skip_layers:
+                if i >= first_skip_layer_idx:
+                    tokens = tokens + intermediate[self._num_layers - 1 - i]
 
-            intermediate.append(tokens)
+                intermediate.append(tokens)
 
         return self._lm_head(self._norm(tokens))  # (B, T, vocab_size)
 

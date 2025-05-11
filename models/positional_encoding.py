@@ -72,16 +72,30 @@ class RotaryPosEmbedding(nn.Module):
         outer product for those positions we need on the fly and only cache the angles.
     """
 
-    def __init__(self, embed_dim: int, max_seq_len: int, theta_base: float = 1e4):
-        """Initialize the positional encoding."""
+    def __init__(self, embed_dim: int, max_seq_len: int, theta_base: float = 1e4, p: float = 0.75):
+        """Initialize the positional encoding.
+
+        Args:
+            embed_dim: The embedding dimension.
+            max_seq_len: The maximum sequence length.
+            theta_base: The base for computing the angles.
+            p: The p-RoPe percentage, i.e., the percentage of features to use for RoPe.
+        """
         super().__init__()
+        if embed_dim % 2 != 0:
+            raise ValueError("embed_dim must be even")
+
+        if p < 0 or p > 1:
+            raise ValueError("p must be between 0 and 1")
+
         self._embed_dim = embed_dim
         self._max_seq_len = max_seq_len
+        self._max_idx = int(embed_dim // 2 * p) * 2
 
         # pre-compute the rotations
-        pos = torch.arange(max_seq_len, dtype=torch.float32)
+        self._pos_indices = nn.Buffer(torch.arange(max_seq_len, dtype=torch.long), persistent=False)
         theta = theta_base ** (-2.0 * (torch.arange(embed_dim // 2, dtype=torch.float32)) / embed_dim)
-        angle_matrix = torch.outer(pos, theta)  # multiply every position with every angle
+        angle_matrix = torch.outer(self._pos_indices.float(), theta)  # multiply every position with every angle
         self._cos_cache = nn.Buffer(angle_matrix.cos().repeat_interleave(2, dim=-1), persistent=False)
         self._sin_cache = nn.Buffer(angle_matrix.sin().repeat_interleave(2, dim=-1), persistent=False)
         self._sin_cache[:, 0::2] *= -1  # negate the even indices
@@ -108,7 +122,20 @@ class RotaryPosEmbedding(nn.Module):
         if seq_len > self._max_seq_len:
             raise ValueError("The maximum sequence length is exceeded.")
 
-        pos_indices = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
-        tokens_permuted_pairs = tokens.view(*tokens.shape[:-1], tokens.shape[-1] // 2, 2)[..., [1, 0]].flatten(-2)
+        tokens_rot = tokens[..., : self._max_idx]
 
-        return tokens * self._cos_cache[pos_indices, None] + tokens_permuted_pairs * self._sin_cache[pos_indices, None]
+        pos_indices = self._pos_indices[:seq_len]  # torch.arange(seq_len, dtype=torch.long, device=tokens.device)
+        tokens_rot_perm = tokens_rot.view(*tokens_rot.shape[:-1], tokens_rot.shape[-1] // 2, 2)[..., [1, 0]].flatten(-2)
+
+        tokens_rot = (
+            tokens_rot * self._cos_cache[pos_indices, None, : self._max_idx]
+            + tokens_rot_perm * self._sin_cache[pos_indices, None, : self._max_idx]
+        )
+
+        return torch.cat(
+            [
+                tokens_rot,
+                tokens[..., self._max_idx :],
+            ],
+            dim=-1,
+        )
