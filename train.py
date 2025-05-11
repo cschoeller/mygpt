@@ -72,6 +72,7 @@ class TrainConfig:
             heads=6,
             n_layers=6,
             drop_rate=0.2,
+            u_net_skips=True,
             ffn_activation="relu",  # {"relu", "gelu", "relu2"}
             normalization="layernorm",  # {"layernorm", "dynamic_tanh"}
             positional_encoding="rotary",  # {"learned", "sinusoidal", "nope", "rotary"}

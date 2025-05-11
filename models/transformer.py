@@ -23,6 +23,7 @@ class TransformerParams:
     heads: int = 6
     n_layers: int = 6
     drop_rate: float = 0.2
+    u_net_skips: bool = False
     ffn_activation: str = "relu"
     normalization: str = "layernorm"
     positional_encoding: str = "learned"
@@ -124,7 +125,7 @@ class RotaryCausalSelfAttention(nn.Module):
         q, k = self._rotary_embedding(q), self._rotary_embedding(k)
         out_heads = scaled_dot_product_attention(
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), dropout_p=self._drop_rate, is_causal=True
-        ).transpose(1, 2)
+        ).transpose(1, 2)  # transpose back to (B, T, num_heads, head_dim)
         out_heads = out_heads.flatten(start_dim=2)  # flatten heads
         out = self._head_to_embed(out_heads)
         return self._dropout(out)
@@ -167,12 +168,14 @@ class Transformer(BaseLanguageModel):
         """Initialize the model."""
         super().__init__()
         self._context_length = params.context_length
+        self._skip_layers = params.u_net_skips
+        self._num_layers = params.n_layers
         self._token_embedding_table = nn.Embedding(params.vocab_size, params.embed_dim)
         self._positional_encoder = _get_positional_encoding(
             params.positional_encoding, params.context_length, params.embed_dim
         )
         assert self._positional_encoder == None if params.positional_encoding == "rotary" else True
-        self._sa_head = nn.Sequential(*(TransformerLayer(params) for _ in range(params.n_layers)))
+        self._layers = nn.ModuleList([TransformerLayer(params) for _ in range(self._num_layers)])
         self._norm = _get_normalization(params.normalization, params.embed_dim)
         self._lm_head = nn.Linear(params.embed_dim, params.vocab_size, bias=False)
         self.apply(self._init_weights)
@@ -201,7 +204,17 @@ class Transformer(BaseLanguageModel):
         if self._positional_encoder is not None:
             token_pos_indices = torch.arange(T, device=token_indices.device)
             tokens = self._positional_encoder(tokens, token_pos_indices)  # (B, T, embed_dim)
-        tokens = self._sa_head(tokens)  # (B, T, embed_dim)
+
+        # compute pass through layers, optionally with skip connections
+        intermediate_outputs = []
+        first_skip_layer_idx = self._num_layers // 2 + 1
+        for i, layer in enumerate(self._layers):
+            tokens = layer(tokens)
+
+            intermediate_outputs.append(tokens)
+            if self._skip_layers and i >= first_skip_layer_idx:
+                tokens = tokens + intermediate_outputs[self._num_layers - 1 - i]
+
         tokens = self._norm(tokens)  # (B, T, embed_dim)
         return self._lm_head(tokens)  # (B, T, vocab_size)
 
