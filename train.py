@@ -76,6 +76,7 @@ class TrainConfig:
             ffn_activation="relu",  # {"relu", "gelu", "relu2"}
             normalization="layernorm",  # {"layernorm", "dynamic_tanh"}
             positional_encoding="rotary",  # {"learned", "sinusoidal", "nope", "rotary"}
+            qk_norm=True,
         )
     )
 

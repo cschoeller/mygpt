@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.nn.functional import scaled_dot_product_attention
 
 from models.base_language_model import BaseLanguageModel
@@ -27,6 +28,7 @@ class TransformerParams:
     ffn_activation: str = "relu"
     normalization: str = "layernorm"
     positional_encoding: str = "learned"
+    qk_norm: bool = False
 
 
 def _get_activation(activation: str):
@@ -63,18 +65,13 @@ def _get_positional_encoding(positional_encoding: str, context_length: int, embe
 
 
 def _get_attention_layer(params: TransformerParams):
-    if params.positional_encoding == "rotary":
-        return RotaryCausalSelfAttention(
-            embed_dim=params.embed_dim,
-            num_heads=params.heads,
-            drop_rate=params.drop_rate,
-            max_seq_len=params.context_length,
-        )
-
-    return CausalSelfAttention(
+    return RotaryCausalSelfAttention(
         embed_dim=params.embed_dim,
         num_heads=params.heads,
         drop_rate=params.drop_rate,
+        rotary=params.positional_encoding == "rotary",
+        max_seq_len=params.context_length,
+        qk_norm=params.qk_norm,
     )
 
 
@@ -101,17 +98,31 @@ class CausalSelfAttention(nn.Module):
 
 
 class RotaryCausalSelfAttention(nn.Module):
-    def __init__(self, *, embed_dim: int, num_heads: int, drop_rate: float, max_seq_len: int = 256):
+    def __init__(
+        self,
+        *,
+        embed_dim: int,
+        num_heads: int,
+        drop_rate: float,
+        rotary: bool = True,
+        max_seq_len: int = 256,
+        qk_norm: bool = False,
+    ):
         super().__init__()
-        # self._embed_dim = embed_dim
         self._num_heads = num_heads
         self._head_dim = embed_dim // num_heads
-        self._max_seq_len = max_seq_len
+        self._rotary = rotary
+        self._qk_norm = qk_norm
         self._qkv_embed = nn.Linear(embed_dim, 3 * num_heads * self._head_dim, bias=False)
-        self._rotary_embedding = RotaryPosEmbedding(self._head_dim, max_seq_len=max_seq_len)
         self._drop_rate = drop_rate
         self._head_to_embed = nn.Linear(num_heads * self._head_dim, embed_dim, bias=False)
         self._dropout = nn.Dropout(drop_rate)
+
+        if self._rotary:
+            self._rotary_embedding = RotaryPosEmbedding(self._head_dim, max_seq_len=max_seq_len)
+
+        if self._qk_norm:
+            self._g = nn.Parameter(torch.log2(torch.tensor([max_seq_len**2 - max_seq_len])))
 
     def forward(self, tokens: torch.Tensor):
         """Computes the output of the rotary causal self-attention.
@@ -122,9 +133,21 @@ class RotaryCausalSelfAttention(nn.Module):
         # to (B, T, 3 * num_heads, head_dim)
         out_heads = self._qkv_embed(tokens).view(*tokens.shape[:-1], 3 * self._num_heads, self._head_dim)
         q, k, v = out_heads.chunk(3, dim=-2)  # to (B, T, num_heads, head_dim)
-        q, k = self._rotary_embedding(q), self._rotary_embedding(k)
+
+        if self._rotary:
+            q, k = self._rotary_embedding(q), self._rotary_embedding(k)
+
+        if self._qk_norm:
+            q = self._g * F.normalize(q, p=2, dim=-1)
+            k = F.normalize(k, p=2, dim=-1)
+
         out_heads = scaled_dot_product_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), dropout_p=self._drop_rate, is_causal=True
+            q.transpose(1, 2),
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+            dropout_p=self._drop_rate,
+            is_causal=True,
+            scale=1.0 if self._qk_norm else None,  # defaults to sqrt(d) if None
         ).transpose(1, 2)  # transpose back to (B, T, num_heads, head_dim)
         out_heads = out_heads.flatten(start_dim=2)  # flatten heads
         out = self._head_to_embed(out_heads)
