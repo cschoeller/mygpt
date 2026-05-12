@@ -185,7 +185,7 @@ class TransformerLayer(nn.Module):
 
 
 class Transformer(BaseLanguageModel):
-    """Stores a lookup table of embeddings per token to model next-token distributions."""
+    """GPT style transformer language model."""
 
     def __init__(self, params: TransformerParams):
         """Initialize the model."""

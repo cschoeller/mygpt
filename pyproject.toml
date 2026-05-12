@@ -1,0 +1,51 @@
+[project]
+name = "mygpt"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch==2.11.0",
+    "torchvision",
+    "ruff",
+    "regex",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+# Use Ruff to auto-format code (including isort behavior)
+quote-style = "double" # Choose "single" if you prefer single quotes
+indent-style = "space" # Use "tab" if you prefer tabs
+line-ending = "lf" # Change to "crlf" for Windows
+docstring-code-format = true # Format code blocks inside docstrings
+
+[tool.ruff.lint]
+# Enable the isort rules within Ruff’s linter
+select = ["I"]
+
+[tool.ruff.lint.isort]
+# Automatically group standard library, third-party, and first-party imports
+known-first-party = ["tokenizers", "models", "data"] # Replace with your project’s package name
+combine-as-imports = true # Merge "import X as Y" statements if possible
+force-sort-within-sections = true # Sort imports inside standard, third-party, and first-party groups
+force-single-line = false # Set to true if you prefer each import on a separate line
+lines-between-types = 1 # Ensure a blank line between stdlib, third-party, and first-party imports
+order-by-type = true # Order imports by type (functions, classes, constants)
+relative-imports-order = "closest-to-furthest" # Sort relative imports properly
+split-on-trailing-comma = false # Set to true if you prefer breaking imports on commas
+
+[tool.ruff.lint.pydocstyle]
+# If you use pydocstyle, make sure imports are well-documented
+convention = "google" # Options: "google", "numpy", "pep257"
