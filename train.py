@@ -20,6 +20,7 @@ from models.gpt import KarpathyGPT
 from models.recurrent import RecurrentEnsembleLM, RecurrentLM, RecurrentLMGraves
 from models.transformer import Transformer, TransformerParams
 from models.transformer_vanilla import TransformerVanilla
+from optimizer.muon import Muon, split_params_for_muon
 from tokenizers.byte_pair_tokenizer import BytePairTokenizer
 from tokenizers.char_tokenizer import CharTokenizer
 
@@ -28,6 +29,12 @@ torch.set_float32_matmul_precision("high")  # enable tensor cores
 if torch.backends.cuda.is_flash_attention_available():
     torch.backends.cuda.enable_flash_sdp(enabled=True)
     torch.backends.cuda.enable_mem_efficient_sdp(enabled=True)
+
+
+class OptimizerType(Enum):
+    ADAMW = auto()
+    MUON = auto()
+    ADAMUON = auto()
 
 
 class ModelType(Enum):
@@ -52,11 +59,13 @@ class TrainConfig:
     epochs = 1
     batch_size: int = 64
     lr: float = 1e-3
+    lr_muon: float = 1e-2
     clip_grads: float | None = 1
     shuffle: bool = True
     compile: bool = True
     mixed_precision: bool = True
     device: str = "cuda"
+    optimizer: OptimizerType = OptimizerType.ADAMUON
 
     # regularization
     weight_decay: float = 0.01
@@ -119,7 +128,7 @@ def step(
     model: nn.Module,
     loss_fn,
     scaler: GradScaler,
-    optimizer: Optimizer,
+    optimizers: list[Optimizer],
     config: TrainConfig,
     is_train: bool = True,
 ) -> tuple[float, float]:
@@ -127,31 +136,34 @@ def step(
     x, targets = batch
     x, targets = x.to(config.device), targets.to(config.device)
 
-    # some speedup from optimizer compilation, reduce-overhead (cuda graphs)
-    # and disabling grad in validation
-    @torch.compile(disable=not config.compile, mode="reduce-overhead")
-    def _compiled_step(is_train: bool) -> torch.Tensor:
-        with (
-            torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision),
-            torch.set_grad_enabled(is_train),
-        ):
-            logits = model(x)
-            loss = loss_fn(logits, targets)
+    with (
+        torch.autocast(device_type=config.device, dtype=torch.float16, enabled=config.mixed_precision),
+        torch.set_grad_enabled(is_train),
+    ):
+        torch.compiler.cudagraph_mark_step_begin()
+        logits = model(x)
+        loss = loss_fn(logits, targets)
 
-        if is_train:
-            optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
+    if is_train:
+        for optim in optimizers:
+            optim.zero_grad(set_to_none=True)
 
-            if config.clip_grads is not None:
-                scaler.unscale_(optimizer)  # needed for regular clipping
-                clip_grad_norm_(model.parameters(), max_norm=config.clip_grads)
+        scaler.scale(loss).backward()
 
-            scaler.step(optimizer)
-            scaler.update()
+        if config.clip_grads is not None:
+            params = {}
+            for optim in optimizers:
+                scaler.unscale_(optim)  # needed for regular clipping
+                for group in optim.param_groups:
+                    for p in group["params"]:
+                        params[id(p)] = p
+            clip_grad_norm_(params.values(), max_norm=config.clip_grads)
 
-        return loss
+        for optim in optimizers:
+            scaler.step(optim)
 
-    loss = _compiled_step(is_train)
+        scaler.update()
+
     return loss.item(), (time() - batch_start)
 
 
@@ -166,20 +178,26 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
         val_dataset, batch_size=config.batch_size, shuffle=config.shuffle, num_workers=8, pin_memory=True
     )
     scaler = torch.amp.GradScaler(device=config.device, enabled=config.mixed_precision)
-    optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    optimizers = build_optimizers(model, config)
+
+    # compile model and loss for speedup, but not the optimizer loop, as this causes issues with Muon
+    model_compiled = torch.compile(model, disable=not config.compile, mode="reduce-overhead")
+    loss_fn_compiled = torch.compile(loss_fn, disable=not config.compile, mode="reduce-overhead")
 
     for e in range(1, config.epochs + 1):
         running_loss = 0.0
 
         for i, batch in enumerate(train_loader):
-            loss, batch_time = step(batch, model, loss_fn, scaler, optimizer, config)
+            loss, batch_time = step(batch, model_compiled, loss_fn_compiled, scaler, optimizers, config)
             running_loss += loss
 
             val_result = ""
             if i == len(train_loader) - 1:
                 total_val_loss = 0.0
                 for batch in val_loader:
-                    val_loss, _ = step(batch, model, loss_fn, scaler, optimizer, config, is_train=False)
+                    val_loss, _ = step(
+                        batch, model_compiled, loss_fn_compiled, scaler, optimizers, config, is_train=False
+                    )
                     total_val_loss += val_loss
                 val_result = f", val_loss {total_val_loss / len(val_loader):.6f}"
 
@@ -198,6 +216,21 @@ def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_toke
     for pred in preds:
         sample_text = tokenizer.decode(pred[1:].tolist())
         print(sample_text + "\n")
+
+
+def build_optimizers(model: nn.Module, config: TrainConfig) -> list[Optimizer]:
+    match config.optimizer:
+        case OptimizerType.ADAMW:
+            return [AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay, foreach=True)]
+        case OptimizerType.MUON:
+            return [Muon(model.parameters(), lr=config.lr_muon, weight_decay=config.weight_decay, nesterov=True)]
+        case OptimizerType.ADAMUON:
+            muon_params, adamw_params = split_params_for_muon(model)
+            muon = Muon(muon_params, lr=config.lr_muon, weight_decay=config.weight_decay, nesterov=True)
+            adamw = AdamW(adamw_params, lr=config.lr, weight_decay=config.weight_decay, foreach=True)
+            return [muon, adamw]
+        case _:
+            raise KeyError(f"Specified optimizer type {config.optimizer} not available.")
 
 
 def build_model(config: TrainConfig):
