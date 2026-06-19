@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from torch.optim.adamw import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import Dataset
 
@@ -56,11 +57,12 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 1
+    epochs = 10
     batch_size: int = 64
     lr: float = 1e-3
     lr_muon: float = 1e-2
-    clip_grads: float | None = 1
+    use_scheduler: bool = True
+    clip_grads: float | None = None
     shuffle: bool = True
     compile: bool = True
     mixed_precision: bool = True
@@ -131,6 +133,7 @@ def step(
     optimizers: list[Optimizer],
     config: TrainConfig,
     is_train: bool = True,
+    schedulers: list[SequentialLR] | None = None,
 ) -> tuple[float, float]:
     batch_start = time()
     x, targets = batch
@@ -159,8 +162,11 @@ def step(
                         params[id(p)] = p
             clip_grad_norm_(params.values(), max_norm=config.clip_grads)
 
-        for optim in optimizers:
+        # step optimizer and corresponding scheduler
+        for i, optim in enumerate(optimizers):
             scaler.step(optim)
+            if schedulers is not None:
+                schedulers[i].step()
 
         scaler.update()
 
@@ -179,6 +185,7 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     )
     scaler = torch.amp.GradScaler(device=config.device, enabled=config.mixed_precision)
     optimizers = build_optimizers(model, config)
+    schedulers = build_schedulers(optimizers, dataset_size=len(train_loader), config=config)
 
     # compile model and loss for speedup, but not the optimizer loop, as this causes issues with Muon
     model_compiled = torch.compile(model, disable=not config.compile, mode="reduce-overhead")
@@ -188,7 +195,9 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
         running_loss = 0.0
 
         for i, batch in enumerate(train_loader):
-            loss, batch_time = step(batch, model_compiled, loss_fn_compiled, scaler, optimizers, config)
+            loss, batch_time = step(
+                batch, model_compiled, loss_fn_compiled, scaler, optimizers, config, schedulers=schedulers
+            )
             running_loss += loss
 
             val_result = ""
@@ -231,6 +240,23 @@ def build_optimizers(model: nn.Module, config: TrainConfig) -> list[Optimizer]:
             return [muon, adamw]
         case _:
             raise KeyError(f"Specified optimizer type {config.optimizer} not available.")
+
+
+def build_schedulers(optimizers: list[Optimizer], dataset_size: int, config: TrainConfig) -> list[SequentialLR] | None:
+    if not config.use_scheduler:
+        return None
+
+    total_iters = config.epochs * dataset_size
+    warmup_iters = int(total_iters * 0.1)
+
+    schedulers = []
+    for optim in optimizers:
+        warmup = LinearLR(optim, start_factor=0.01, total_iters=warmup_iters)
+        cosine = CosineAnnealingLR(optim, T_max=(total_iters - warmup_iters))
+        combined_scheduler = SequentialLR(optim, schedulers=[warmup, cosine], milestones=[warmup_iters])
+        schedulers.append(combined_scheduler)
+
+    return schedulers
 
 
 def build_model(config: TrainConfig):
