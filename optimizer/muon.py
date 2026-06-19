@@ -1,4 +1,7 @@
-"""Implementation of Muon Optimizer and Newton Schulz matrix orthogonalization."""
+"""
+Implementation of Muon Optimizer and Newton Schulz matrix orthogonalization.
+Note: This file was partially AI generated.
+"""
 
 from collections.abc import Callable
 import logging
@@ -144,10 +147,54 @@ class Muon(Optimizer):
             )
 
 
-def split_params_for_muon(model: torch.nn.Module) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
-    """Split parameters into Muon-compatible (2D+) and fallback (1D/scalar) groups."""
-    muon_params, other_params = [], []
+def split_params_for_muon(
+    model: torch.nn.Module,
+    lm_head_names: tuple[str, ...] = ("lm_head", "_lm_head", "head", "output", "out_proj_head"),
+) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+    """Split parameters into Muon-compatible (hidden 2D+) and AdamW (everything else) groups.
+
+    Following the Muon recommendations (Keller Jordan's blogpost and the Moonlight paper),
+    only the *hidden* 2D+ weight matrices should be optimized with Muon. The following are
+    explicitly routed to AdamW even when they have ndim >= 2:
+
+    - All ``nn.Embedding`` parameters (including token and learned positional embeddings).
+      Embedding rows are independent lookup vectors; orthogonalizing across the vocabulary
+      dimension is semantically meaningless and empirically harmful.
+    - The final language-model head (output projection to vocab logits). It benefits from
+      AdamW's per-coordinate adaptive scaling and behaves more like an embedding than a
+      hidden transform.
+
+    1D/0D tensors (biases, LayerNorm gains, etc.) always go to AdamW since Newton-Schulz
+    requires at least a matrix.
+
+    Args:
+        model: The model whose parameters should be split.
+        lm_head_names: Substrings used to detect the LM head module by its fully qualified
+            name. Match is performed against the last component of the dotted name so that
+            e.g. ``transformer._lm_head`` is detected via ``"_lm_head"``.
+
+    Returns:
+        Tuple ``(muon_params, adamw_params)`` containing the parameters for the two
+        optimizers. Every trainable parameter of the model appears in exactly one list.
+    """
+    # collect the set of parameter ids that should be excluded from Muon by name
+    excluded_ids: set[int] = set()
+    for module_name, module in model.named_modules():
+        leaf_name = module_name.rsplit(".", 1)[-1]
+        is_embedding = isinstance(module, torch.nn.Embedding)
+        is_lm_head = leaf_name in lm_head_names
+        if is_embedding or is_lm_head:
+            for p in module.parameters(recurse=False):
+                excluded_ids.add(id(p))
+
+    # split parameters into Muon and AdamW groups based on dimensions and exclusion set
+    muon_params: list[torch.nn.Parameter] = []
+    other_params: list[torch.nn.Parameter] = []
     for p in model.parameters():
-        if p.requires_grad:
-            (muon_params if p.ndim >= 2 else other_params).append(p)
+        if not p.requires_grad:
+            continue
+        if p.ndim >= 2 and id(p) not in excluded_ids:
+            muon_params.append(p)
+        else:
+            other_params.append(p)
     return muon_params, other_params
