@@ -1,9 +1,12 @@
 from dataclasses import dataclass, field
+import datetime
 from enum import Enum, auto
 import os
 import pickle
 from time import time
+from typing import Final
 
+import matplotlib.pyplot as plt
 import torch
 from torch import nn
 from torch.amp import GradScaler
@@ -13,7 +16,7 @@ from torch.optim import Optimizer
 from torch.optim.adamw import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data.dataloader import DataLoader
-from torch.utils.data.dataset import Dataset
+from torch.utils.data.dataset import ConcatDataset, Dataset
 
 from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
@@ -30,6 +33,13 @@ torch.set_float32_matmul_precision("high")  # enable tensor cores
 if torch.backends.cuda.is_flash_attention_available():
     torch.backends.cuda.enable_flash_sdp(enabled=True)
     torch.backends.cuda.enable_mem_efficient_sdp(enabled=True)
+
+# TODO:
+# - Don't save all intermediate outputs with skip connections in transformer
+# - Shuffle dataset chunks before splitting to train and val to avoid bias
+
+
+_CONTEXT_LENGTH: Final = 256
 
 
 class OptimizerType(Enum):
@@ -51,18 +61,23 @@ class ModelType(Enum):
 @dataclass
 class TrainConfig:
     # data
-    dataset_path: str = (
-        "data/tinyshakespeare.txt"  # "data/tinyshakespeare.txt" "data/BNCSplitWordsCorpus.txt" "data/taylorswift.txt"
+    dataset_paths: str = field(
+        default_factory=lambda: [
+            # "data/tinyshakespeare.txt",
+            "data/BNCSplitWordsCorpus.txt",
+            # "data/taylorswift.txt",
+        ]
     )
+    text_stride: int | None = _CONTEXT_LENGTH // 8  # defaults to context_length
     p_train: float = 0.9
 
     # training
-    epochs = 10
+    epochs = 20
     batch_size: int = 64
     lr: float = 1e-3
     lr_muon: float = 1e-2
     use_scheduler: bool = True
-    clip_grads: float | None = None
+    clip_grads: float | None = 1.0
     shuffle: bool = True
     compile: bool = True
     mixed_precision: bool = True
@@ -70,7 +85,7 @@ class TrainConfig:
     optimizer: OptimizerType = OptimizerType.ADAMUON
 
     # regularization
-    weight_decay: float = 0.01
+    weight_decay: float = 0.02
 
     # model
     model: ModelType = ModelType.TRANSFORMER
@@ -78,13 +93,13 @@ class TrainConfig:
     transformer_params: TransformerParams = field(
         default_factory=lambda: TransformerParams(
             vocab_size=512,
-            context_length=256,
+            context_length=_CONTEXT_LENGTH,
             embed_dim=384,
             heads=6,
             n_layers=6,
-            drop_rate=0.2,
-            u_net_skips=True,
-            ffn_activation="relu",  # {"relu", "gelu", "relu2"}
+            drop_rate=0.3,
+            u_net_skips=False,
+            ffn_activation="gelu",  # {"relu", "gelu", "relu2"}
             normalization="layernorm",  # {"layernorm", "dynamic_tanh"}
             positional_encoding="rotary",  # {"learned", "sinusoidal", "nope", "rotary"}
             qk_norm=True,
@@ -93,17 +108,19 @@ class TrainConfig:
 
 
 class TextDataset(Dataset):
-    def __init__(self, text_tensor: torch.Tensor, block_size: int) -> None:
+    def __init__(self, text_tensor: torch.Tensor, block_size: int, stride: int = 1) -> None:
         self._text_tensor = text_tensor
         self._block_size = block_size
+        self._stride = stride
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        x = self._text_tensor[idx : idx + self._block_size]
-        y = self._text_tensor[idx + 1 : idx + self._block_size + 1]
+        offset = idx * self._stride
+        x = self._text_tensor[offset : offset + self._block_size]
+        y = self._text_tensor[offset + 1 : offset + self._block_size + 1]
         return x, y
 
     def __len__(self) -> int:
-        return len(self._text_tensor) - self._block_size
+        return (len(self._text_tensor) - self._block_size) // self._stride
 
 
 def load_text(path_to_textfile: str) -> str:
@@ -111,11 +128,17 @@ def load_text(path_to_textfile: str) -> str:
         return f.read()
 
 
-def create_datasets(encoded_text: torch.Tensor, config: TrainConfig) -> tuple[TextDataset, TextDataset]:
-    n = int(config.p_train * len(encoded_text))
-    train, val = encoded_text[:n], encoded_text[n:]
-    context_length = config.transformer_params.context_length
-    return TextDataset(train, context_length), TextDataset(val, context_length)
+def create_datasets(encoded_texts: list[torch.Tensor], config: TrainConfig) -> tuple[Dataset, Dataset]:
+    train_datasets = []
+    val_datasets = []
+    stride = config.transformer_params.context_length if config.text_stride is None else config.text_stride
+    for encoded_text in encoded_texts:
+        n = int(config.p_train * len(encoded_text))
+        train, val = encoded_text[:n], encoded_text[n:]
+        context_length = config.transformer_params.context_length
+        train_datasets.append(TextDataset(train, context_length, stride=stride))
+        val_datasets.append(TextDataset(val, context_length, stride=stride))
+    return ConcatDataset(train_datasets), ConcatDataset(val_datasets)
 
 
 def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -173,7 +196,7 @@ def step(
     return loss.item(), (time() - batch_start)
 
 
-def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
+def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig) -> tuple[list[float], list[float]]:
     model.train()
     model.to(config.device)
 
@@ -190,6 +213,9 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
     # compile model and loss for speedup, but not the optimizer loop, as this causes issues with Muon
     model_compiled = torch.compile(model, disable=not config.compile, mode="reduce-overhead")
     loss_fn_compiled = torch.compile(loss_fn, disable=not config.compile, mode="reduce-overhead")
+
+    train_losses = []
+    val_losses = []
 
     for e in range(1, config.epochs + 1):
         running_loss = 0.0
@@ -208,13 +234,37 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig):
                         batch, model_compiled, loss_fn_compiled, scaler, optimizers, config, is_train=False
                     )
                     total_val_loss += val_loss
-                val_result = f", val_loss {total_val_loss / len(val_loader):.6f}"
+
+                avg_val_loss = total_val_loss / len(val_loader)
+                val_result = f", val_loss {avg_val_loss:.6f}"
+
+                val_losses.append(avg_val_loss)
+                avg_train_loss = running_loss / len(train_loader)
+                train_losses.append(avg_train_loss)
 
             print(
                 f"epoch {e}, batch {i}/{len(train_loader) - 1}, loss {running_loss / (i + 1):.6f}"
                 + val_result
                 + f", s/it {batch_time:.4f}"
             )
+
+    return train_losses, val_losses
+
+
+def plot_loss_curves(train_losses: list[float], val_losses: list[float], out_path: str) -> None:
+    epochs = list(range(1, len(train_losses) + 1))
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, train_losses, label="train loss", marker="o")
+    plt.plot(epochs, val_losses, label="val loss", marker="o")
+    plt.xlabel("epoch")
+    plt.ylabel("loss")
+    plt.title("Training and validation loss")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved loss curve to {out_path}")
 
 
 def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int, config: TrainConfig):
@@ -236,7 +286,9 @@ def build_optimizers(model: nn.Module, config: TrainConfig) -> list[Optimizer]:
         case OptimizerType.ADAMUON:
             muon_params, adamw_params = split_params_for_muon(model)
             muon = Muon(muon_params, lr=config.lr_muon, weight_decay=config.weight_decay, nesterov=True)
-            adamw = AdamW(adamw_params, lr=config.lr, weight_decay=config.weight_decay, foreach=True)
+            adamw = AdamW(
+                adamw_params, lr=config.lr, weight_decay=0.0, foreach=True
+            )  # don't decay embeddings, biases, inputs, outputs
             return [muon, adamw]
         case _:
             raise KeyError(f"Specified optimizer type {config.optimizer} not available.")
@@ -290,8 +342,9 @@ def build_model(config: TrainConfig):
 
 
 def main():
+    experiment_start = time()
     config = TrainConfig()
-    text = load_text(config.dataset_path)
+    texts = [load_text(dataset_path) for dataset_path in config.dataset_paths]
 
     # tokenizer = CharTokenizer()
     if os.path.exists("bpe_tokenizer.pkl"):
@@ -300,12 +353,12 @@ def main():
     else:
         print("Training tokenizer...")
         tokenizer = BytePairTokenizer(vocab_size=config.transformer_params.vocab_size)
-        tokenizer.train(text)
+        tokenizer.train("\n".join(texts))
         pickle.dump(tokenizer, open("bpe_tokenizer.pkl", "wb"))
 
     print("Encoding training text...")
-    encoded_text = torch.tensor(tokenizer.encode(text), dtype=torch.long)
-    train_dataset, val_dataset = create_datasets(encoded_text, config)
+    encoded_texts = [torch.tensor(tokenizer.encode(text), dtype=torch.long) for text in texts]
+    train_dataset, val_dataset = create_datasets(encoded_texts, config)
 
     print("Building model...")
     model = build_model(config)
@@ -314,7 +367,14 @@ def main():
     print(f"Number of trainable parameters: {num_params}")
 
     print("Training model...")
-    train(model, train_dataset, val_dataset, config)
+    train_losses, val_losses = train(model, train_dataset, val_dataset, config)
+
+    print("Plotting loss curves...")
+    plot_loss_curves(
+        train_losses,
+        val_losses,
+        out_path=f"{config.model.name.lower()}_loss_{config.epochs}ep.png",
+    )
 
     print("Saving checkpoint...")
     torch.save(model.state_dict(), f"{config.model.name.lower()}_checkpoint_{config.epochs}ep.pt")
@@ -322,6 +382,8 @@ def main():
 
     print("Generating text...")
     sample_text(model, tokenizer, max_new_tokens=1000, config=config)
+
+    print("Total experiment time:", datetime.timedelta(seconds=int(time() - experiment_start)))
 
 
 if __name__ == "__main__":

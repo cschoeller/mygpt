@@ -124,17 +124,18 @@ class Muon(Optimizer):
                 else:
                     self._warn_sgd_fallback_once(p, self.state[p])
 
-                # AdamW-style weight decay
-                p.mul_(1.0 - lr * wdc)
-
                 # As NewtonSchulz computes an orthonormal approximation of grad, the update would
                 # be stronger for matrices with cols > rows, than for rows > cols, because all columns
                 # are unit length. To normalize this effect (its Frobenius norm), we scale the grad matrix
                 # by sqrt(rows/cols).
                 scale_factor = 1.0 if grad.ndim < 2 else max(1, grad.shape[0] / grad.shape[1]) ** 0.5
+                update = update * scale_factor
+
+                # weight decay
+                p.mul_(1.0 - lr * wdc)
 
                 # param update
-                p.add_(-lr * scale_factor * update)
+                p.add_(-lr * update)
 
     def _warn_sgd_fallback_once(self, param: torch.Tensor, state: dict[str, Any]) -> None:
         """Log a warning the first time a parameter falls back to SGD due to insufficient dimensions."""
