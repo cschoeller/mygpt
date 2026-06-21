@@ -81,7 +81,7 @@ class TrainConfig:
     p_train: float = 0.9
 
     # training
-    epochs = 5
+    epochs = 20
     batch_size: int = 128
     lr: float = 1e-3
     lr_muon: float = 1e-2
@@ -103,10 +103,10 @@ class TrainConfig:
         default_factory=lambda: TransformerParams(
             vocab_size=512,
             context_length=_CONTEXT_LENGTH,
-            embed_dim=128,  # 384
+            embed_dim=256,  # 384
             heads=4,  # 6
             n_layers=3,  # 6
-            drop_rate=0.3,
+            drop_rate=0.2,
             u_net_skips=False,
             ffn_activation="relu",  # {"relu", "gelu", "relu2"}
             normalization="layernorm",  # {"layernorm", "dynamic_tanh"}
@@ -114,7 +114,7 @@ class TrainConfig:
             qk_norm=True,
         )
     )
-    tokenizer = TokenizerType.TIKTOKEN
+    tokenizer = TokenizerType.CUSTOM_BPE
 
 
 class TextDataset(Dataset):
@@ -360,12 +360,13 @@ def build_tokenizer(texts: list[str], config: TrainConfig) -> BaseTokenizer | ti
         case TokenizerType.CUSTOM_BPE:
             if os.path.exists("bpe_tokenizer.pkl"):
                 print("Loading custom from tokenizer from disk...")
-                tokenizer = pickle.load(open("bpe_tokenizer.pkl", "rb"))
+                return pickle.load(open("bpe_tokenizer.pkl", "rb"))
             else:
                 print("Training custom tokenizer...")
                 tokenizer = BytePairTokenizer(vocab_size=config.transformer_params.vocab_size)
                 tokenizer.train("\n".join(texts))
                 pickle.dump(tokenizer, open("bpe_tokenizer.pkl", "wb"))
+                return tokenizer
         case TokenizerType.TIKTOKEN:
             enc = tiktoken.encoding_for_model("gpt2")
             config.transformer_params.vocab_size = enc.n_vocab
