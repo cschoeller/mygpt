@@ -9,6 +9,7 @@ dependencies = [
     "torchvision",
     "ruff",
     "regex",
+    "tiktoken>=0.13.0",
 ]
 
 [[tool.uv.index]]

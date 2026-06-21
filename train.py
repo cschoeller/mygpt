@@ -7,6 +7,7 @@ from time import time
 from typing import Final
 
 import matplotlib.pyplot as plt
+import tiktoken
 import torch
 from torch import nn
 from torch.amp import GradScaler
@@ -25,6 +26,7 @@ from models.recurrent import RecurrentEnsembleLM, RecurrentLM, RecurrentLMGraves
 from models.transformer import Transformer, TransformerParams
 from models.transformer_vanilla import TransformerVanilla
 from optimizer.muon import Muon, split_params_for_muon
+from tokenizers.base_tokenizer import BaseTokenizer
 from tokenizers.byte_pair_tokenizer import BytePairTokenizer
 from tokenizers.char_tokenizer import CharTokenizer
 
@@ -35,11 +37,18 @@ if torch.backends.cuda.is_flash_attention_available():
     torch.backends.cuda.enable_mem_efficient_sdp(enabled=True)
 
 # TODO:
+# - Finish integrating tiktoken gpt-2
 # - Don't save all intermediate outputs with skip connections in transformer
 # - Shuffle dataset chunks before splitting to train and val to avoid bias
 
 
 _CONTEXT_LENGTH: Final = 256
+
+
+class TokenizerType(Enum):
+    CUSTOM_BPE = auto()
+    CHAR = auto()
+    TIKTOKEN = auto()
 
 
 class OptimizerType(Enum):
@@ -68,12 +77,12 @@ class TrainConfig:
             # "data/taylorswift.txt",
         ]
     )
-    text_stride: int | None = _CONTEXT_LENGTH // 8  # defaults to context_length
+    text_stride: int | None = _CONTEXT_LENGTH // 4  # None: defaults to context_length
     p_train: float = 0.9
 
     # training
-    epochs = 20
-    batch_size: int = 64
+    epochs = 5
+    batch_size: int = 128
     lr: float = 1e-3
     lr_muon: float = 1e-2
     use_scheduler: bool = True
@@ -85,7 +94,7 @@ class TrainConfig:
     optimizer: OptimizerType = OptimizerType.ADAMUON
 
     # regularization
-    weight_decay: float = 0.02
+    weight_decay: float = 0.01
 
     # model
     model: ModelType = ModelType.TRANSFORMER
@@ -94,17 +103,18 @@ class TrainConfig:
         default_factory=lambda: TransformerParams(
             vocab_size=512,
             context_length=_CONTEXT_LENGTH,
-            embed_dim=384,
-            heads=6,
-            n_layers=6,
+            embed_dim=128,  # 384
+            heads=4,  # 6
+            n_layers=3,  # 6
             drop_rate=0.3,
             u_net_skips=False,
-            ffn_activation="gelu",  # {"relu", "gelu", "relu2"}
+            ffn_activation="relu",  # {"relu", "gelu", "relu2"}
             normalization="layernorm",  # {"layernorm", "dynamic_tanh"}
             positional_encoding="rotary",  # {"learned", "sinusoidal", "nope", "rotary"}
             qk_norm=True,
         )
     )
+    tokenizer = TokenizerType.TIKTOKEN
 
 
 class TextDataset(Dataset):
@@ -128,7 +138,7 @@ def load_text(path_to_textfile: str) -> str:
         return f.read()
 
 
-def create_datasets(encoded_texts: list[torch.Tensor], config: TrainConfig) -> tuple[Dataset, Dataset]:
+def build_datasets(encoded_texts: list[torch.Tensor], config: TrainConfig) -> tuple[Dataset, Dataset]:
     train_datasets = []
     val_datasets = []
     stride = config.transformer_params.context_length if config.text_stride is None else config.text_stride
@@ -341,24 +351,41 @@ def build_model(config: TrainConfig):
     raise KeyError("Specified model type {config.model} not available.")
 
 
+def build_tokenizer(texts: list[str], config: TrainConfig) -> BaseTokenizer | tiktoken.Encoding:
+
+    match config.tokenizer:
+        case TokenizerType.CHAR:
+            print("Using character level tokenizer....")
+            return CharTokenizer()
+        case TokenizerType.CUSTOM_BPE:
+            if os.path.exists("bpe_tokenizer.pkl"):
+                print("Loading custom from tokenizer from disk...")
+                tokenizer = pickle.load(open("bpe_tokenizer.pkl", "rb"))
+            else:
+                print("Training custom tokenizer...")
+                tokenizer = BytePairTokenizer(vocab_size=config.transformer_params.vocab_size)
+                tokenizer.train("\n".join(texts))
+                pickle.dump(tokenizer, open("bpe_tokenizer.pkl", "wb"))
+        case TokenizerType.TIKTOKEN:
+            enc = tiktoken.encoding_for_model("gpt2")
+            config.transformer_params.vocab_size = enc.n_vocab
+            print("Using tiktoken gpt-2 tokenizer with vocab size", enc.n_vocab)
+            return enc
+        case _:
+            raise KeyError(f"Specified tokenizer type {config.tokenizer} not available.")
+
+
 def main():
     experiment_start = time()
     config = TrainConfig()
     texts = [load_text(dataset_path) for dataset_path in config.dataset_paths]
 
-    # tokenizer = CharTokenizer()
-    if os.path.exists("bpe_tokenizer.pkl"):
-        print("Loading from tokenizer from disk...")
-        tokenizer = pickle.load(open("bpe_tokenizer.pkl", "rb"))
-    else:
-        print("Training tokenizer...")
-        tokenizer = BytePairTokenizer(vocab_size=config.transformer_params.vocab_size)
-        tokenizer.train("\n".join(texts))
-        pickle.dump(tokenizer, open("bpe_tokenizer.pkl", "wb"))
+    print("Building tokenizer...")
+    tokenizer = build_tokenizer(texts, config)
 
     print("Encoding training text...")
     encoded_texts = [torch.tensor(tokenizer.encode(text), dtype=torch.long) for text in texts]
-    train_dataset, val_dataset = create_datasets(encoded_texts, config)
+    train_dataset, val_dataset = build_datasets(encoded_texts, config)
 
     print("Building model...")
     model = build_model(config)
@@ -383,6 +410,7 @@ def main():
     print("Generating text...")
     sample_text(model, tokenizer, max_new_tokens=1000, config=config)
 
+    print("Perplexity score:", torch.exp(torch.tensor(val_losses[-1])))
     print("Total experiment time:", datetime.timedelta(seconds=int(time() - experiment_start)))
 
 
