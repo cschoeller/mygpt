@@ -48,7 +48,7 @@ _CONTEXT_LENGTH: Final = 256
 class TokenizerType(Enum):
     CUSTOM_BPE = auto()
     CHAR = auto()
-    TIKTOKEN = auto()
+    TIKTOKEN_GPT2 = auto()
 
 
 class OptimizerType(Enum):
@@ -367,7 +367,7 @@ def build_tokenizer(texts: list[str], config: TrainConfig) -> BaseTokenizer | ti
                 tokenizer.train("\n".join(texts))
                 pickle.dump(tokenizer, open("bpe_tokenizer.pkl", "wb"))
                 return tokenizer
-        case TokenizerType.TIKTOKEN:
+        case TokenizerType.TIKTOKEN_GPT2:
             enc = tiktoken.encoding_for_model("gpt2")
             config.transformer_params.vocab_size = enc.n_vocab
             print("Using tiktoken gpt-2 tokenizer with vocab size", enc.n_vocab)
