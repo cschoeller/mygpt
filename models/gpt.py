@@ -2,6 +2,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from models.base_language_model import BaseLanguageModel
+
 vocab_size = 65
 n_embd = 384
 n_head = 6
@@ -31,7 +33,7 @@ class Head(nn.Module):
         q = self.query(x)  # (B,T,hs)
         # compute attention scores ("affinities")
         wei = q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5  # (B, T, hs) @ (B, hs, T) -> (B, T, T)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T) # type: ignore
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
         wei = self.dropout(wei)
         # perform the weighted aggregation of the values
@@ -89,7 +91,7 @@ class Block(nn.Module):
         return x
 
 
-class KarpathyGPT(nn.Module):
+class KarpathyGPT(BaseLanguageModel):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
@@ -110,11 +112,10 @@ class KarpathyGPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
-        B, T = idx.shape
+    def forward(self, token_indices: torch.Tensor):
+        B, T = token_indices.shape
 
-        # idx and targets are both (B,T) tensor of integers
-        tok_emb = self.token_embedding_table(idx)  # (B,T,C)
+        tok_emb = self.token_embedding_table(token_indices)  # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T,C)
         x = tok_emb + pos_emb  # (B,T,C)
         x = self.blocks(x)  # (B,T,C)
@@ -123,19 +124,19 @@ class KarpathyGPT(nn.Module):
 
         return logits
 
-    def generate(self, idx, max_new_tokens):
+    def generate(self, token_indices, max_new_tokens, temp: float = 1.0) -> torch.Tensor:
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
             # crop idx to the last block_size tokens
-            idx_cond = idx[:, -block_size:]
+            idx_cond = token_indices[:, -block_size:]
             # get the predictions
             logits = self(idx_cond)
             # focus only on the last time step
             logits = logits[:, -1, :]  # becomes (B, C)
             # apply softmax to get probabilities
-            probs = F.softmax(logits, dim=-1)  # (B, C)
+            probs = F.softmax(logits / temp, dim=-1)  # (B, C)
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
             # append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
-        return idx
+            idx = torch.cat((token_indices, idx_next), dim=1)  # (B, T+1)
+        return token_indices

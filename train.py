@@ -4,20 +4,20 @@ from enum import Enum, auto
 import os
 import pickle
 from time import time
-from typing import Final
+from typing import Callable, Final, TypeAlias, cast
 
 import matplotlib.pyplot as plt
 import tiktoken
 import torch
 from torch import nn
-from torch.amp import GradScaler
+from torch.amp.grad_scaler import GradScaler
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from torch.optim.adamw import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data.dataloader import DataLoader
-from torch.utils.data.dataset import ConcatDataset, Dataset
+from torch.utils.data.dataset import Dataset
 
 from models.base_language_model import BaseLanguageModel
 from models.bigram import BigramLM
@@ -36,10 +36,8 @@ if torch.backends.cuda.is_flash_attention_available():
     torch.backends.cuda.enable_flash_sdp(enabled=True)
     torch.backends.cuda.enable_mem_efficient_sdp(enabled=True)
 
-# TODO:
-# - Finish integrating tiktoken gpt-2
-# - Don't save all intermediate outputs with skip connections in transformer
-# - Shuffle dataset chunks before splitting to train and val to avoid bias
+
+AnyTokenizer: TypeAlias = BaseTokenizer | tiktoken.Encoding
 
 
 _CONTEXT_LENGTH: Final = 256
@@ -68,16 +66,28 @@ class ModelType(Enum):
 
 
 @dataclass
+class DatasetConfig:
+    name: str
+    train_path: str
+    val_path: str | None = None
+    test_path: str | None = None
+
+
+@dataclass
 class TrainConfig:
     # data
-    dataset_paths: str = field(
-        default_factory=lambda: [
-            # "data/tinyshakespeare.txt",
-            "data/BNCSplitWordsCorpus.txt",
-            # "data/taylorswift.txt",
-        ]
+    datasets: DatasetConfig = field(
+        default_factory=lambda: DatasetConfig(name="bncsplitwords", train_path="data/BNCSplitWordsCorpus.txt")
     )
-    text_stride: int | None = _CONTEXT_LENGTH // 4  # None: defaults to context_length
+    # DatasetConfig(name="bncsplitwords", train_path="data/BNCSplitWordsCorpus.txt")
+    # DatasetConfig(name="tinyshakespeare", train_path="data/tinyshakespeare.txt"),
+    # DatasetConfig(
+    #     name="wikitext",
+    #     train_path="data/wikitext-103/wikitext-103/wiki.train.tokens",
+    #     val_path="data/wikitext-103/wikitext-103/wiki.valid.tokens",
+    #     test_path="data/wikitext-103/wikitext-103/wiki.test.tokens",
+    # ),
+    text_stride: int | None = None  # None: defaults to context_length
     p_train: float = 0.9
 
     # training
@@ -138,17 +148,41 @@ def load_text(path_to_textfile: str) -> str:
         return f.read()
 
 
-def build_datasets(encoded_texts: list[torch.Tensor], config: TrainConfig) -> tuple[Dataset, Dataset]:
-    train_datasets = []
-    val_datasets = []
-    stride = config.transformer_params.context_length if config.text_stride is None else config.text_stride
-    for encoded_text in encoded_texts:
-        n = int(config.p_train * len(encoded_text))
-        train, val = encoded_text[:n], encoded_text[n:]
-        context_length = config.transformer_params.context_length
-        train_datasets.append(TextDataset(train, context_length, stride=stride))
-        val_datasets.append(TextDataset(val, context_length, stride=stride))
-    return ConcatDataset(train_datasets), ConcatDataset(val_datasets)
+def shuffle_context_chunks(encoded_text: torch.Tensor, context_length: int) -> torch.Tensor:
+    # cut to a multiple of context_length
+    encoded_text = encoded_text[: (len(encoded_text) // context_length) * context_length]
+    # reshape to (n, context_length) and shuffle
+    chunks = encoded_text.view(-1, context_length)
+    rand_indices = torch.randperm(chunks.size(0))
+    return chunks[rand_indices].reshape(-1)
+
+
+def build_datasets(
+    train_text: str, val_text: str | None, tokenizer: AnyTokenizer, config: TrainConfig
+) -> tuple[TextDataset, TextDataset]:
+    context_length = config.transformer_params.context_length
+    stride = context_length if config.text_stride is None else config.text_stride
+
+    # tokenize the train text
+    train_tokens = torch.tensor(tokenizer.encode(train_text), dtype=torch.long)
+
+    if val_text is not None:  # explicit val set
+        print("# Encoding separate validation set")
+        val_tokens = torch.tensor(tokenizer.encode(val_text), dtype=torch.long)
+    else:  # split val from train
+        print("# Splitting validation set")
+        if stride == context_length:  # in this case we can shuffle
+            print("# Chunk and shuffle")
+            train_tokens = shuffle_context_chunks(train_tokens, context_length=context_length)
+            split_idx = int((len(train_tokens) // context_length) * config.p_train) * context_length
+        else:  # arbitrary stride, split without constraints
+            print("# No chunking")
+            split_idx = int(config.p_train * len(train_tokens))
+        train_tokens, val_tokens = train_tokens[:split_idx], train_tokens[split_idx:]
+
+    train_datasets = TextDataset(train_tokens, context_length, stride=stride)
+    val_datasets = TextDataset(val_tokens, context_length, stride=stride)
+    return train_datasets, val_datasets
 
 
 def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -161,7 +195,7 @@ def loss_fn(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 def step(
     batch: tuple[torch.Tensor, torch.Tensor],
     model: nn.Module,
-    loss_fn,
+    loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     scaler: GradScaler,
     optimizers: list[Optimizer],
     config: TrainConfig,
@@ -206,7 +240,9 @@ def step(
     return loss.item(), (time() - batch_start)
 
 
-def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig) -> tuple[list[float], list[float]]:
+def train(
+    model: nn.Module, train_dataset: TextDataset, val_dataset: TextDataset, config: TrainConfig
+) -> tuple[list[float], list[float]]:
     model.train()
     model.to(config.device)
 
@@ -216,13 +252,14 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig) -> 
     val_loader = DataLoader(
         val_dataset, batch_size=config.batch_size, shuffle=config.shuffle, num_workers=8, pin_memory=True
     )
-    scaler = torch.amp.GradScaler(device=config.device, enabled=config.mixed_precision)
+    scaler = GradScaler(device=config.device, enabled=config.mixed_precision)
     optimizers = build_optimizers(model, config)
     schedulers = build_schedulers(optimizers, dataset_size=len(train_loader), config=config)
 
     # compile model and loss for speedup, but not the optimizer loop, as this causes issues with Muon
     model_compiled = torch.compile(model, disable=not config.compile, mode="reduce-overhead")
     loss_fn_compiled = torch.compile(loss_fn, disable=not config.compile, mode="reduce-overhead")
+    model_compiled = cast(nn.Module, model_compiled)
 
     train_losses = []
     val_losses = []
@@ -238,12 +275,14 @@ def train(model: nn.Module, train_dataset, val_dataset, config: TrainConfig) -> 
 
             val_result = ""
             if i == len(train_loader) - 1:
+                model_compiled.eval()
                 total_val_loss = 0.0
                 for batch in val_loader:
                     val_loss, _ = step(
                         batch, model_compiled, loss_fn_compiled, scaler, optimizers, config, is_train=False
                     )
                     total_val_loss += val_loss
+                model_compiled.train()
 
                 avg_val_loss = total_val_loss / len(val_loader)
                 val_result = f", val_loss {avg_val_loss:.6f}"
@@ -277,7 +316,7 @@ def plot_loss_curves(train_losses: list[float], val_losses: list[float], out_pat
     print(f"Saved loss curve to {out_path}")
 
 
-def sample_text(model: BaseLanguageModel, tokenizer: CharTokenizer, max_new_tokens: int, config: TrainConfig):
+def sample_text(model: BaseLanguageModel, tokenizer: AnyTokenizer, max_new_tokens: int, config: TrainConfig) -> None:
     model.to(config.device)
     model.eval()
     start_tokens = torch.zeros(size=(1, 1), dtype=torch.long, device=config.device)
@@ -321,7 +360,7 @@ def build_schedulers(optimizers: list[Optimizer], dataset_size: int, config: Tra
     return schedulers
 
 
-def build_model(config: TrainConfig):
+def build_model(config: TrainConfig) -> BaseLanguageModel:
     transformer_params = config.transformer_params
     match config.model:
         case ModelType.BIGRAM:
@@ -348,11 +387,10 @@ def build_model(config: TrainConfig):
         case ModelType.KARPATHY:
             return KarpathyGPT()
 
-    raise KeyError("Specified model type {config.model} not available.")
+    raise KeyError(f"Specified model type {config.model} not available.")
 
 
-def build_tokenizer(texts: list[str], config: TrainConfig) -> BaseTokenizer | tiktoken.Encoding:
-
+def build_tokenizer(text: str, config: TrainConfig) -> AnyTokenizer:
     match config.tokenizer:
         case TokenizerType.CHAR:
             print("Using character level tokenizer....")
@@ -364,7 +402,7 @@ def build_tokenizer(texts: list[str], config: TrainConfig) -> BaseTokenizer | ti
             else:
                 print("Training custom tokenizer...")
                 tokenizer = BytePairTokenizer(vocab_size=config.transformer_params.vocab_size)
-                tokenizer.train("\n".join(texts))
+                tokenizer.train(text)
                 pickle.dump(tokenizer, open("bpe_tokenizer.pkl", "wb"))
                 return tokenizer
         case TokenizerType.TIKTOKEN_GPT2:
@@ -376,17 +414,22 @@ def build_tokenizer(texts: list[str], config: TrainConfig) -> BaseTokenizer | ti
             raise KeyError(f"Specified tokenizer type {config.tokenizer} not available.")
 
 
+def load_tokenize_and_build(config: TrainConfig) -> tuple[TextDataset, TextDataset, AnyTokenizer]:
+    print("Loading raw text...")
+    train_text = load_text(config.datasets.train_path)
+    val_text = load_text(config.datasets.val_path) if config.datasets.val_path else None
+    print("Building tokenizer...")
+    tokenizer = build_tokenizer(train_text, config)
+    print("Tokenizing and building dataset...")
+    train_dataset, val_dataset = build_datasets(train_text, val_text, tokenizer, config)
+    return train_dataset, val_dataset, tokenizer
+
+
 def main():
     experiment_start = time()
     config = TrainConfig()
-    texts = [load_text(dataset_path) for dataset_path in config.dataset_paths]
 
-    print("Building tokenizer...")
-    tokenizer = build_tokenizer(texts, config)
-
-    print("Encoding training text...")
-    encoded_texts = [torch.tensor(tokenizer.encode(text), dtype=torch.long) for text in texts]
-    train_dataset, val_dataset = build_datasets(encoded_texts, config)
+    train_dataset, val_dataset, tokenizer = load_tokenize_and_build(config)
 
     print("Building model...")
     model = build_model(config)

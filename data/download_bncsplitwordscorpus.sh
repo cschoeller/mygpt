@@ -1,0 +1,1 @@
+wget -O BNCSplitWordsCorpus.txt https://raw.githubusercontent.com/Phylliida/Dialogue-Datasets/refs/heads/master/BNCSplitWordsCorpus.txt
