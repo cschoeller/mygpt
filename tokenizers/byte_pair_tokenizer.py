@@ -45,7 +45,9 @@ def _replace_byte_pair(byte_sequence: list[int], target_pair: tuple[int, int], t
     return result_sequence
 
 
-def byte_pair_encode(text_byte_chunks: list[list[int]], max_steps: int) -> tuple[list[int], dict[tuple[int, int], int]]:
+def byte_pair_encode(
+    text_byte_chunks: list[list[int]], max_steps: int
+) -> tuple[list[list[int]], dict[tuple[int, int], int]]:
     """
     Encode a list of bytes using byte pair encoding.
 

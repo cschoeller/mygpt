@@ -36,6 +36,27 @@ if torch.backends.cuda.is_flash_attention_available():
     torch.backends.cuda.enable_flash_sdp(enabled=True)
     torch.backends.cuda.enable_mem_efficient_sdp(enabled=True)
 
+# TODO:
+# - Add mechanism to store tokenized text as a cache to save time
+# - Add multi-node support
+
+# def save_tokens(tokens: torch.Tensor, path: str) -> None:
+#     tokens.numpy().astype(np.int32).tofile(path)
+
+# def load_tokens(path: str) -> np.memmap:
+#     return np.memmap(path, dtype=np.int32, mode="r")
+
+
+# class TextDataset(Dataset):
+# def __init__(self, tokens: torch.Tensor | np.memmap, block_size: int, stride: int = 1) -> None:
+#     # ...existing code...
+
+# def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+#     offset = idx * self._stride
+#     x = torch.from_numpy(np.array(self._text_tensor[offset : offset + self._block_size], dtype=np.int64))
+#     y = torch.from_numpy(np.array(self._text_tensor[offset + 1 : offset + self._block_size + 1], dtype=np.int64))
+#     return x, y
+
 
 AnyTokenizer: TypeAlias = BaseTokenizer | tiktoken.Encoding
 
@@ -77,7 +98,12 @@ class DatasetConfig:
 class TrainConfig:
     # data
     datasets: DatasetConfig = field(
-        default_factory=lambda: DatasetConfig(name="bncsplitwords", train_path="data/BNCSplitWordsCorpus.txt")
+        default_factory=lambda: DatasetConfig(
+            name="wikitext",
+            train_path="data/wikitext-103/wikitext-103/wiki.train.tokens",
+            val_path="data/wikitext-103/wikitext-103/wiki.valid.tokens",
+            test_path="data/wikitext-103/wikitext-103/wiki.test.tokens",
+        )
     )
     # DatasetConfig(name="bncsplitwords", train_path="data/BNCSplitWordsCorpus.txt")
     # DatasetConfig(name="tinyshakespeare", train_path="data/tinyshakespeare.txt"),
@@ -111,11 +137,11 @@ class TrainConfig:
     gen_temperature: float = 1.0
     transformer_params: TransformerParams = field(
         default_factory=lambda: TransformerParams(
-            vocab_size=512,
+            vocab_size=1024,  # 512
             context_length=_CONTEXT_LENGTH,
             embed_dim=256,  # 384
             heads=4,  # 6
-            n_layers=3,  # 6
+            n_layers=6,
             drop_rate=0.2,
             u_net_skips=False,
             ffn_activation="relu",  # {"relu", "gelu", "relu2"}
@@ -125,6 +151,7 @@ class TrainConfig:
         )
     )
     tokenizer = TokenizerType.CUSTOM_BPE
+    bpe_tokenizer_checkpoint: str = "bpe_tokenizer_wiki_1024.pkl"
 
 
 class TextDataset(Dataset):
@@ -167,16 +194,16 @@ def build_datasets(
     train_tokens = torch.tensor(tokenizer.encode(train_text), dtype=torch.long)
 
     if val_text is not None:  # explicit val set
-        print("# Encoding separate validation set")
+        print("Encoding separate validation set...")
         val_tokens = torch.tensor(tokenizer.encode(val_text), dtype=torch.long)
     else:  # split val from train
-        print("# Splitting validation set")
+        print("Splitting validation set...")
         if stride == context_length:  # in this case we can shuffle
-            print("# Chunk and shuffle")
+            print("Chunk and shuffle...")
             train_tokens = shuffle_context_chunks(train_tokens, context_length=context_length)
             split_idx = int((len(train_tokens) // context_length) * config.p_train) * context_length
         else:  # arbitrary stride, split without constraints
-            print("# No chunking")
+            print("No chunking...")
             split_idx = int(config.p_train * len(train_tokens))
         train_tokens, val_tokens = train_tokens[:split_idx], train_tokens[split_idx:]
 
@@ -396,14 +423,14 @@ def build_tokenizer(text: str, config: TrainConfig) -> AnyTokenizer:
             print("Using character level tokenizer....")
             return CharTokenizer()
         case TokenizerType.CUSTOM_BPE:
-            if os.path.exists("bpe_tokenizer.pkl"):
+            if os.path.exists(config.bpe_tokenizer_checkpoint):
                 print("Loading custom from tokenizer from disk...")
-                return pickle.load(open("bpe_tokenizer.pkl", "rb"))
+                return pickle.load(open(config.bpe_tokenizer_checkpoint, "rb"))
             else:
                 print("Training custom tokenizer...")
                 tokenizer = BytePairTokenizer(vocab_size=config.transformer_params.vocab_size)
-                tokenizer.train(text)
-                pickle.dump(tokenizer, open("bpe_tokenizer.pkl", "wb"))
+                tokenizer.train(text[:10_000_000])
+                pickle.dump(tokenizer, open(config.bpe_tokenizer_checkpoint, "wb"))
                 return tokenizer
         case TokenizerType.TIKTOKEN_GPT2:
             enc = tiktoken.encoding_for_model("gpt2")
